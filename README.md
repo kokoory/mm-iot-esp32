@@ -13,6 +13,30 @@ the standard test and development cycle for a software release and may be incomp
 supported features. They intend to provide a starting point for integrating Morse Micro software to
 projects based on these platforms.
 
+# Seeed Studio XIAO ESP32S3 + Wio-WM6180 Wi-Fi HaLow Module
+
+This SDK is pre-configured for use with the [Seeed Studio XIAO ESP32S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) and
+[Wio-WM6180 Wi-Fi HaLow Module for XIAO](https://wiki.seeedstudio.com/getting_started_with_wifi_halow_module_for_xiao/).
+
+## Default Pin Mapping (XIAO ESP32S3 + WM6180)
+
+| Signal    | GPIO | XIAO Pin | Direction |
+|-----------|------|----------|-----------|
+| RESET_N   | 1    | D0       | Output    |
+| WAKE      | 2    | D1       | Output    |
+| SPI_IRQ   | 3    | D2       | Input     |
+| SPI_CS    | 4    | D3       | Output    |
+| BUSY      | 5    | D4       | Input (not wired) |
+| SPI_SCK   | 7    | D8       | SPI Clock |
+| SPI_MISO  | 8    | D9       | SPI MISO  |
+| SPI_MOSI  | 9    | D10      | SPI MOSI  |
+
+> **Note:** The BUSY pin is **not wired** on Seeed XIAO HaLow boards. Power save is disabled
+> in all examples as a workaround (`mmwlan_set_power_save_mode(MMWLAN_PS_DISABLED)`).
+
+If you are using a different board, adjust the pin configuration via `idf.py menuconfig` under
+`(Top) → Component config → Morse Micro Shim Configuration`.
+
 # How to use
 
 ## Follow the ESP-IDF Getting Started Guide
@@ -100,11 +124,10 @@ Memory allocation                                            [ PASS ]
 Memory reallocation                                          [ PASS ]
 Passage of time                                              [ PASS ]
 Task creation and preemption                                 [ PASS ]
-WLAN HAL initialisation                                      I (513) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (523) gpio: GPIO[8]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (533) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (543) gpio: GPIO[9]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 1| Intr:1
-I (543) gpio: GPIO[21]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:2
+WLAN HAL initialisation                                      I (513) gpio: GPIO[2]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
+I (523) gpio: GPIO[4]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
+I (533) gpio: GPIO[5]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 1| Intr:1
+I (543) gpio: GPIO[3]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:2
 
 Hard reset device
 Send training sequence
@@ -143,11 +166,10 @@ following.
 ```
 Morse Scan Demo (Built Aug  9 2023 17:39:12)
 
-I (445) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (455) gpio: GPIO[8]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (465) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (475) gpio: GPIO[9]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 1| Intr:1
-I (485) gpio: GPIO[21]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:2
+I (445) gpio: GPIO[2]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
+I (455) gpio: GPIO[4]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
+I (465) gpio: GPIO[5]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 1| Intr:1
+I (475) gpio: GPIO[3]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:2
 Morse firmware version rel_1_9_1_2023_Aug_07, morselib version bccf2e03c, Morse chip ID 0x206
 
 Scan started on AU channels, Waiting for results...
@@ -185,11 +207,10 @@ Output will vary depending on the AP configuration, but should look something li
 ```
 Morse STA Demo (Built Aug  9 2023 17:42:35)
 
-I (446) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (456) gpio: GPIO[8]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (466) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (476) gpio: GPIO[9]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 1| Intr:1
-I (486) gpio: GPIO[21]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:2
+I (446) gpio: GPIO[2]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
+I (456) gpio: GPIO[4]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
+I (466) gpio: GPIO[5]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 1| Intr:1
+I (476) gpio: GPIO[3]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:2
 Morse firmware version rel_1_9_1_2023_Aug_07, morselib version bccf2e03c, Morse chip ID 0x206
 
 STA state: CONNECTING (1)

@@ -3,52 +3,62 @@
 menu "Morse Micro Shim Configuration"
     config MM_RESET_N
         int "RESET_N pin for MM chip"
-        default 3
+        default 1
         help
             Output gpio pin used to control the RESET_N line.
+            Default is GPIO 1 (XIAO D0) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
 
     config MM_WAKE
         int "WAKE pin for MM chip"
-        default 8
+        default 2
         help
             Output gpio pin used to control the WAKE line.
+            Default is GPIO 2 (XIAO D1) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
 
     config MM_BUSY
         int "BUSY pin for the MM chip"
-        default 9
+        default 5
         help
             Input pin used as a rising edge interrupt.
+            Default is GPIO 5 (XIAO D4) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
+            Note: BUSY pin is not wired on Seeed XIAO HaLow boards.
+            Power save must be disabled as a workaround.
 
     config MM_SPI_SCK
         int "SCK pin for MM chip"
-        default 12
+        default 7
         help
             SPI clock pin.
+            Default is GPIO 7 (XIAO D8/SCK) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
 
     config MM_SPI_MOSI
         int "MOSI pin for MM chip"
-        default 11
+        default 9
         help
             SPI master out slave in pin.
+            Default is GPIO 9 (XIAO D10/MOSI) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
 
     config MM_SPI_MISO
         int "MISO pin for MM chip"
-        default 13
+        default 8
         help
             SPI master in slave out pin.
+            Default is GPIO 8 (XIAO D9/MISO) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
 
     config MM_SPI_CS
         int "SPI CS pin for MM chip"
-        default 10
+        default 4
         help
             SPI chip select pin.
+            Default is GPIO 4 (XIAO D3) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
 
     config MM_SPI_IRQ
         int "SPI IRQ pin for MM chip"
-        default 5
+        default 3
         help
             Out of band interupt pin used to indicate that
             the MM chip has data for the host.
+            Default is GPIO 3 (XIAO D2) for Seeed Studio XIAO ESP32S3 + WM6180 HaLow.
 
     config MM_BCF_FILE
         string "MM Board Configuration File"

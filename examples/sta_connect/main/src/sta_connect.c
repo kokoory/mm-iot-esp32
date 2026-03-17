@@ -155,6 +155,10 @@ void app_main(void)
     mmhal_init();
     mmwlan_init();
 
+    /* Seeed XIAO HaLow boards do not wire the BUSY pin.
+     * Disable power save as a workaround. */
+    mmwlan_set_power_save_mode(MMWLAN_PS_DISABLED);
+
     /* Load channel list. */
     channel_list = mmwlan_lookup_regulatory_domain(get_regulatory_db(), COUNTRY_CODE);
     if (channel_list == NULL)
