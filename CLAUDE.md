@@ -152,8 +152,12 @@ CONFIG_MMHAL_CHIP_TYPE_MM8108=y
 
 ### 3. Web Camera Example
 - Created `examples/web_camera/` for XIAO ESP32S3 Sense + HaLow camera streaming
-- MJPEG streaming over HTTP with endpoints: `/`, `/stream`, `/capture`
-- Uses `espressif/esp32-camera` component with PSRAM for frame buffers
+  - Based on [Seeed Studio reference](https://github.com/Seeed-Studio/mm-iot-esp32/tree/main/examples/web_camera_serve)
+- MJPEG streaming over HTTP at `/` endpoint
+- Periodic ARP keep-alive to maintain router connectivity
+- Custom partition table (4MB app) for 8MB flash
+- DHCP enabled by default, country code "US"
+- Uses `espressif/esp32-camera ^2.0.13` with PSRAM (octal mode, 80MHz)
 
 ### 4. README Update
 - Added XIAO-specific pin mapping table and documentation

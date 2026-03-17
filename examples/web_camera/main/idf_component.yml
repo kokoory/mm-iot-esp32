@@ -1,6 +1,6 @@
-# Copyright 2024 Morse Micro
-# SPDX-License-Identifier: Apache-2.0
 dependencies:
+  espressif/esp32-camera: "^2.0.13"
+  idf: ">=5.1.0"
   mmutils:
     path: $MMIOT_ROOT/framework/src/mmutils
   morselib:
@@ -11,5 +11,3 @@ dependencies:
     path: $MMIOT_ROOT/framework/src/mmipal
   mmregdb:
     path: $MMIOT_ROOT/framework/src/mmregdb
-  espressif/esp32-camera:
-    version: "*"

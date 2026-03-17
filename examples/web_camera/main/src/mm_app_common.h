@@ -56,3 +56,9 @@ void app_wlan_start(void);
  * Disconnects from Wi-Fi and de-initializes the WLAN interface.
  */
 void app_wlan_stop(void);
+
+/**
+ * Send a gratuitous ARP packet to notify the router that this device is online.
+ * Called periodically from the main loop to maintain connectivity.
+ */
+void app_wlan_arp_send(void);

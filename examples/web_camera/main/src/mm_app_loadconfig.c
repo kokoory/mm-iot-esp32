@@ -21,10 +21,10 @@
 #include "mmregdb.h"
 
 
-// #define COUNTRY_CODE "AU"
+#define COUNTRY_CODE "US"
 #ifndef COUNTRY_CODE
 #error COUNTRY_CODE must be defined to the appropriate 2 character country code. \
-       See mmregdb.c for valid options.
+       See mmregdb.h for valid options.
 #endif
 
 #ifndef COUNTRY_CODE
@@ -52,7 +52,7 @@
 
 /* Configure the STA to use DHCP, this overrides any static configuration.
  * If the @c ip.dhcp_enabled is set in the config store that will take priority */
-// #define ENABLE_DHCP                     (1)
+#define ENABLE_DHCP                     (1)
 
 /* Static Network configuration */
 #ifndef STATIC_LOCAL_IP

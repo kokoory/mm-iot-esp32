@@ -6,7 +6,7 @@
 
 #include <string.h>
 #include "mmosal.h"
-#include "mmhal_os.h"
+#include "mmhal.h"
 #include "mmwlan.h"
 #include "mmipal.h"
 #include "mm_app_common.h"
@@ -19,6 +19,11 @@
 
 /** Binary semaphore used to start user_main() once the link comes up. */
 static struct mmosal_semb *link_established = NULL;
+
+static bool link_up = false;
+static uint32_t ip_addr_u32 = 0;
+static uint32_t gw_addr_u32 = 0;
+uint8_t mac_addr[MMWLAN_MAC_ADDR_LEN];
 
 /**
  * WLAN station status callback, invoked when WLAN STA state changes.
@@ -59,53 +64,20 @@ static void link_status_callback(const struct mmipal_link_status *link_status)
         printf("Gateway: %s\n", link_status->gateway);
 
         mmosal_semb_give(link_established);
+
+        ip_addr_u32 = ipaddr_addr(link_status->ip_addr);
+        printf("IP hex: 0X%X\n", ip_addr_u32);
+        gw_addr_u32 = ipaddr_addr(link_status->gateway);
+        printf("GW hex: 0X%X\n", gw_addr_u32);
+
+        link_up = true;
+        app_wlan_arp_send();
     }
     else
     {
         printf("Link is down. Time: %lu ms\n", time_ms);
+        link_up = false;
     }
-}
-
-void app_print_version_info(void)
-{
-    enum mmwlan_status status;
-    struct mmwlan_version version = {0};
-    struct mmwlan_bcf_metadata bcf_metadata = {0};
-
-    printf("-----------------------------------\n");
-
-    printf("  HW Version:              %s\n", CONFIG_IDF_TARGET);
-    status = mmwlan_get_bcf_metadata(&bcf_metadata);
-    if (status == MMWLAN_SUCCESS)
-    {
-        printf("  BCF API version:         %u.%u.%u\n",
-               bcf_metadata.version.major, bcf_metadata.version.minor, bcf_metadata.version.patch);
-        if (bcf_metadata.build_version[0] != '\0')
-        {
-            printf("  BCF build version:       %s\n", bcf_metadata.build_version);
-        }
-        if (bcf_metadata.board_desc[0] != '\0')
-        {
-            printf("  BCF board description:   %s\n", bcf_metadata.board_desc);
-        }
-    }
-    else
-    {
-        printf("  !! BCF metadata retrival failed !!\n");
-    }
-
-    status = mmwlan_get_version(&version);
-    if (status != MMWLAN_SUCCESS)
-    {
-        printf("  !! Error occured whilst retrieving version info !!\n");
-    }
-    printf("  Morselib version:        %s\n", version.morselib_version);
-    printf("  Morse firmware version:  %s\n", version.morse_fw_version);
-    printf("  Morse chip ID:           0x%04lx\n", version.morse_chip_id);
-    printf("  Morse chip name:         %s\n", version.morse_chip_id_string);
-    printf("-----------------------------------\n");
-
-    MMOSAL_ASSERT(status == MMWLAN_SUCCESS);
 }
 
 void app_wlan_init(void)
@@ -127,11 +99,6 @@ void app_wlan_init(void)
 
     mmwlan_set_channel_list(load_channel_list());
 
-    /* Boot the WLAN interface so that we can retrieve the firmware version. */
-    struct mmwlan_boot_args boot_args = MMWLAN_BOOT_ARGS_INIT;
-    (void)mmwlan_boot(&boot_args);
-    app_print_version_info();
-
     /* Load IP stack settings from config store, or use defaults if no entry found in
      * config store. */
     struct mmipal_init_args mmipal_init_args = MMIPAL_INIT_ARGS_DEFAULT;
@@ -150,6 +117,14 @@ void app_wlan_init(void)
     MMOSAL_ASSERT(status == MMWLAN_SUCCESS);
     printf("Morse firmware version %s, morselib version %s, Morse chip ID 0x%lx\n\n",
            version.morse_fw_version, version.morselib_version, version.morse_chip_id);
+
+    /* Read and display MAC address. */
+    status = mmwlan_get_mac_addr(mac_addr);
+    if (status != MMWLAN_SUCCESS)
+    {
+        printf("Failed to get MAC address\n");
+        MMOSAL_ASSERT(false);
+    }
 }
 
 void app_wlan_start(void)
@@ -167,7 +142,7 @@ void app_wlan_start(void)
         printf("with passphrase %s", sta_args.passphrase);
     }
     printf("\n");
-    printf("This may take some time (~10 seconds)\n");
+    printf("This may take some time (~30 seconds)\n");
 
     status = mmwlan_sta_enable(&sta_args, sta_status_callback);
     MMOSAL_ASSERT(status == MMWLAN_SUCCESS);
@@ -184,4 +159,34 @@ void app_wlan_stop(void)
 {
     /* Shutdown wlan interface */
     mmwlan_shutdown();
+}
+
+void app_wlan_arp_send(void)
+{
+    if (link_up)
+    {
+        enum mmwlan_status status;
+        /* Send a gratuitous ARP to let the router know we are online. */
+        uint8_t arp_packet[] = {
+            /* 802.3 header: dest_addr, source_addr, ethertype */
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+            0x08, 0x06,
+
+            /* ARP payload */
+            0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01,
+            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+            ((uint8_t *)&ip_addr_u32)[0], ((uint8_t *)&ip_addr_u32)[1],
+            ((uint8_t *)&ip_addr_u32)[2], ((uint8_t *)&ip_addr_u32)[3],
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ((uint8_t *)&gw_addr_u32)[0], ((uint8_t *)&gw_addr_u32)[1],
+            ((uint8_t *)&gw_addr_u32)[2], ((uint8_t *)&gw_addr_u32)[3],
+        };
+        status = mmwlan_tx(arp_packet, sizeof(arp_packet));
+        if (status != MMWLAN_SUCCESS)
+        {
+            printf("TX failed with status %d\n", status);
+            MMOSAL_ASSERT(false);
+        }
+    }
 }
