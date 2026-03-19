@@ -1,0 +1,7 @@
+dependencies:
+  morselib:
+    path: $MMIOT_ROOT/framework/morselib
+  mm_shims:
+    path: $MMIOT_ROOT/framework/mm_shims
+  mmregdb:
+    path: $MMIOT_ROOT/framework/src/mmregdb

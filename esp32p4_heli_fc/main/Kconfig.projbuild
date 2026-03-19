@@ -1,0 +1,71 @@
+menu "Helicopter Flight Controller Configuration"
+
+    menu "IMU SPI Pins"
+        config IMU_SPI_SCK_PIN
+            int "IMU SPI SCK GPIO"
+            default 4
+
+        config IMU_SPI_MOSI_PIN
+            int "IMU SPI MOSI GPIO"
+            default 5
+
+        config IMU_SPI_MISO_PIN
+            int "IMU SPI MISO GPIO"
+            default 6
+
+        config IMU_SPI_CS_PIN
+            int "IMU SPI CS GPIO"
+            default 7
+    endmenu
+
+    menu "I2C Pins"
+        config I2C_SDA_PIN
+            int "I2C SDA GPIO"
+            default 8
+
+        config I2C_SCL_PIN
+            int "I2C SCL GPIO"
+            default 9
+    endmenu
+
+    menu "GPS UART Pins"
+        config GPS_UART_TX_PIN
+            int "GPS UART TX GPIO"
+            default 10
+
+        config GPS_UART_RX_PIN
+            int "GPS UART RX GPIO"
+            default 11
+    endmenu
+
+    menu "PWM Pins"
+        config SWASH_SERVO_1_PIN
+            int "Swashplate Servo 1 GPIO"
+            default 12
+
+        config SWASH_SERVO_2_PIN
+            int "Swashplate Servo 2 GPIO"
+            default 13
+
+        config SWASH_SERVO_3_PIN
+            int "Swashplate Servo 3 GPIO"
+            default 14
+
+        config TAIL_ESC_PIN
+            int "Tail ESC GPIO"
+            default 15
+
+        config MAIN_ESC_PIN
+            int "Main ESC GPIO"
+            default 16
+    endmenu
+
+    config BATT_ADC_PIN
+        int "Battery ADC GPIO"
+        default 17
+
+    config STATUS_LED_PIN
+        int "Status LED GPIO"
+        default 18
+
+endmenu
