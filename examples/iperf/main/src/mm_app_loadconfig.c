@@ -34,7 +34,7 @@
 /* Default SSID  */
 #ifndef SSID
 /** SSID of the AP to connect to. (Do not quote; it will be stringified.) */
-#define SSID                            MorseMicro
+#define SSID                            node2
 #endif
 
 /* Default passphrase  */

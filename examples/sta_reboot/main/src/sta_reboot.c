@@ -30,7 +30,7 @@
 #endif
 
 /** SSID of the AP to connect to. */
-#define SSID "MorseMicro"
+#define SSID "node2"
 /** Passphrase of the AP to connect to. Comment out for OWE. */
 #define PASSPHRASE "12345678"
 

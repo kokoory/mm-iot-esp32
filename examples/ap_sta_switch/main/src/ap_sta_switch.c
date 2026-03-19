@@ -47,7 +47,7 @@
 
 #ifndef STA_SSID
 /** SSID of the AP to connect to in STA mode. */
-#define STA_SSID "MorseMicro"
+#define STA_SSID "node2"
 #endif
 
 #ifndef STA_PASSPHRASE

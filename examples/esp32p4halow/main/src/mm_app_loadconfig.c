@@ -16,7 +16,7 @@
 #endif
 
 #ifndef SSID
-#define SSID                            MorseMicro
+#define SSID                            node2
 #endif
 
 #ifndef SAE_PASSPHRASE
