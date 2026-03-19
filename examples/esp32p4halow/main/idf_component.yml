@@ -1,0 +1,12 @@
+dependencies:
+  idf: ">=5.3.0"
+  mmutils:
+    path: $MMIOT_ROOT/framework/src/mmutils
+  morselib:
+    path: $MMIOT_ROOT/framework/morselib
+  mm_shims:
+    path: $MMIOT_ROOT/framework/mm_shims
+  mmipal:
+    path: $MMIOT_ROOT/framework/src/mmipal
+  mmregdb:
+    path: $MMIOT_ROOT/framework/src/mmregdb
