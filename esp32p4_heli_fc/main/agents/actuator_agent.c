@@ -63,12 +63,15 @@ static int init_mcpwm(void)
     /*
      * Create one timer + operator + comparator + generator per channel.
      * All timers run at 50 Hz with 1 us resolution.
-     * We use MCPWM group 0 for all channels.
+     * ESP32-P4 supports max 3 timers/operators per MCPWM group, so:
+     *   Group 0: channels 0-2 (3 swashplate servos)
+     *   Group 1: channels 3-4 (tail ESC, main ESC)
      */
     for (int i = 0; i < NUM_PWM_CHANNELS; i++) {
+        int group = (i < 3) ? 0 : 1;
         /* Timer */
         mcpwm_timer_config_t timer_cfg = {
-            .group_id = 0,
+            .group_id = group,
             .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
             .resolution_hz = SERVO_TIMEBASE_RES_HZ,
             .period_ticks = SERVO_TIMEBASE_PERIOD,
@@ -82,7 +85,7 @@ static int init_mcpwm(void)
 
         /* Operator */
         mcpwm_operator_config_t oper_cfg = {
-            .group_id = 0,
+            .group_id = group,
         };
         err = mcpwm_new_operator(&oper_cfg, &s_operators[i]);
         if (err != ESP_OK) {

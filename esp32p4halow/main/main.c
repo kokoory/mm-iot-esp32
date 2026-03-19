@@ -1,16 +1,15 @@
 /*
- * ESP32-P4 HaLow Communication Module - Main Entry Point
+ * ESP32-P4 HaLow Communication Module
  *
- * This is the main application for the HaLow (802.11ah) communication
- * subsystem. It runs on Core 1 of the ESP32-P4 and is responsible for:
+ * This module runs on Core 1 of the ESP32-P4 and is responsible for:
  *
  * 1. Initializing the Morse Micro HaLow radio (STA mode)
  * 2. Establishing network connectivity (IP via DHCP)
  * 3. Running the GCS bridge (UDP socket for MAVLink)
  * 4. Running the MAVLink handler (RPC <-> MAVLink translation)
  *
- * The RPC context is shared with the flight controller running on Core 0
- * via a global variable initialized before this task starts.
+ * The RPC context is shared with the flight controller running on Core 0.
+ * It is passed in via halow_comm_start() -- NOT created locally.
  */
 #include <string.h>
 #include <stdio.h>
@@ -18,7 +17,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
 
 #include "mmosal.h"
 #include "mmhal_os.h"
@@ -29,6 +27,7 @@
 #include "rpc/rpc_core.h"
 #include "gcs_bridge.h"
 #include "mavlink_handler.h"
+#include "halow_comm.h"
 
 static const char *TAG = "halow_main";
 
@@ -50,12 +49,8 @@ static const char *TAG = "halow_main";
 #define MAVLINK_TASK_PRIORITY    5
 #define MAVLINK_TASK_CORE        1
 
-/* ── Global shared RPC context ────────────────────────────────── *
- * This is allocated and initialized by the FC (Core 0) before
- * starting the HaLow task. The HaLow module accesses it via
- * this extern declaration.
- */
-rpc_context_t g_rpc_context;
+#define HALOW_INIT_TASK_STACK   8192
+#define HALOW_INIT_TASK_PRIORITY 4
 
 /* ── Network state ────────────────────────────────────────────── */
 
@@ -180,53 +175,42 @@ static int halow_connect(void)
     return 0;
 }
 
-/* ── Main Application Entry ───────────────────────────────────── */
+/* ── HaLow init task (runs on Core 1) ────────────────────────── */
 
-void app_main(void)
+static void halow_init_task(void *param)
 {
-    ESP_LOGI(TAG, "ESP32-P4 HaLow Communication Module starting...");
+    rpc_context_t *rpc = (rpc_context_t *)param;
 
-    /* 1. Initialize NVS (required for Wi-Fi config storage) */
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition erased due to format change");
-        nvs_flash_erase();
-        ret = nvs_flash_init();
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "NVS flash init failed: %s", esp_err_to_name(ret));
-        return;
-    }
+    ESP_LOGI(TAG, "ESP32-P4 HaLow Communication Module starting on Core %d...",
+             xPortGetCoreID());
 
-    /* 2. Initialize RPC context (shared with Core 0 FC) */
-    rpc_init(&g_rpc_context);
-    ESP_LOGI(TAG, "RPC context initialized");
-
-    /* 3. Initialize HaLow radio */
+    /* 1. Initialize HaLow radio */
     if (halow_init_radio() != 0) {
         ESP_LOGE(TAG, "HaLow radio initialization failed");
+        vTaskDelete(NULL);
         return;
     }
 
-    /* 4. Connect to HaLow AP */
+    /* 2. Connect to HaLow AP */
     if (halow_connect() != 0) {
         ESP_LOGE(TAG, "HaLow connection failed, will retry...");
-        /* In production, implement retry logic here */
         vTaskDelay(pdMS_TO_TICKS(5000));
         if (halow_connect() != 0) {
             ESP_LOGE(TAG, "HaLow connection failed after retry");
+            vTaskDelete(NULL);
             return;
         }
     }
 
-    /* 5. Initialize GCS bridge (UDP socket) */
+    /* 3. Initialize GCS bridge (UDP socket) */
     if (gcs_bridge_init() != 0) {
         ESP_LOGE(TAG, "GCS bridge initialization failed");
+        vTaskDelete(NULL);
         return;
     }
     ESP_LOGI(TAG, "GCS bridge ready on UDP port %d", GCS_BRIDGE_UDP_PORT);
 
-    /* 6. Initialize and start MAVLink handler */
+    /* 4. Initialize and start MAVLink handler */
     mavlink_handler_config_t mav_config = {
         .heartbeat_hz  = 1,
         .attitude_hz   = 10,
@@ -235,14 +219,14 @@ void app_main(void)
         .sys_status_hz = 1,
         .vfr_hud_hz    = 2,
     };
-    mavlink_handler_init(&g_rpc_context, &mav_config);
+    mavlink_handler_init(rpc, &mav_config);
 
     /* Create MAVLink handler task pinned to Core 1 */
     BaseType_t task_ret = xTaskCreatePinnedToCore(
         mavlink_handler_task,
         "mavlink_handler",
         MAVLINK_TASK_STACK_SIZE,
-        &g_rpc_context,
+        rpc,
         MAVLINK_TASK_PRIORITY,
         NULL,
         MAVLINK_TASK_CORE
@@ -250,9 +234,30 @@ void app_main(void)
 
     if (task_ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create MAVLink handler task");
+        vTaskDelete(NULL);
         return;
     }
 
     ESP_LOGI(TAG, "MAVLink handler task started on Core %d", MAVLINK_TASK_CORE);
     ESP_LOGI(TAG, "HaLow communication module fully operational");
+
+    /* This init task is done, delete itself */
+    vTaskDelete(NULL);
+}
+
+/* ── Public API ───────────────────────────────────────────────── */
+
+void halow_comm_start(rpc_context_t *rpc)
+{
+    ESP_LOGI(TAG, "Launching HaLow communication on Core %d", MAVLINK_TASK_CORE);
+
+    xTaskCreatePinnedToCore(
+        halow_init_task,
+        "halow_init",
+        HALOW_INIT_TASK_STACK,
+        (void *)rpc,
+        HALOW_INIT_TASK_PRIORITY,
+        NULL,
+        MAVLINK_TASK_CORE
+    );
 }

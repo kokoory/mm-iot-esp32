@@ -6,6 +6,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "driver/uart.h"
 #include "../uorb/topics/sensor_gps.h"
 

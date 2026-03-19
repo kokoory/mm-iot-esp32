@@ -125,9 +125,11 @@ void heli_mixer_update(const heli_mixer_config_t *config,
                           throttle * (config->esc_max_us - config->esc_min_us);
 
     /* Clamp all outputs */
-    output->servo1_us   = constrain_f(output->servo1_us, config->esc_min_us, config->esc_max_us);
-    output->servo2_us   = constrain_f(output->servo2_us, config->esc_min_us, config->esc_max_us);
-    output->servo3_us   = constrain_f(output->servo3_us, config->esc_min_us, config->esc_max_us);
+    float servo_min = config->servo_center_us - config->servo_range_us;
+    float servo_max = config->servo_center_us + config->servo_range_us;
+    output->servo1_us   = constrain_f(output->servo1_us, servo_min, servo_max);
+    output->servo2_us   = constrain_f(output->servo2_us, servo_min, servo_max);
+    output->servo3_us   = constrain_f(output->servo3_us, servo_min, servo_max);
     output->tail_esc_us = constrain_f(output->tail_esc_us, config->esc_min_us, config->esc_max_us);
     output->main_esc_us = constrain_f(output->main_esc_us, config->esc_min_us, config->esc_max_us);
 }

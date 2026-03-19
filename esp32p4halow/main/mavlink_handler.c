@@ -242,9 +242,9 @@ static void send_battery(void)
     send_mavlink_msg(&msg);
 }
 
-static void send_sys_status(void)
+static void send_vfr_hud(void)
 {
-    if (!rate_check(&s_last_sys_status_ms, s_config.sys_status_hz)) {
+    if (!rate_check(&s_last_vfr_hud_ms, s_config.vfr_hud_hz)) {
         return;
     }
 
@@ -282,7 +282,7 @@ static void send_telemetry(void)
     send_attitude();
     send_gps();
     send_battery();
-    send_sys_status();
+    send_vfr_hud();
 }
 
 /* ── Process incoming MAVLink commands from GCS ───────────────── */

@@ -62,8 +62,8 @@ int rpc_telem_send_altitude(rpc_context_t *ctx, const vehicle_local_position_t *
     memset(&msg, 0, sizeof(msg));
     msg.msg_type = RPC_MSG_ALTITUDE;
     msg.timestamp_ms = get_time_ms();
-    msg.data.altitude.alt_msl    = pos->alt_msl;
-    msg.data.altitude.alt_rel    = pos->alt_rel;
+    msg.data.altitude.alt_msl    = pos->alt;       /* use local alt as MSL approximation */
+    msg.data.altitude.alt_rel    = pos->alt;       /* relative alt (above home) */
     msg.data.altitude.climb_rate = pos->climb_rate;
 
     return rpc_send_telemetry(ctx, &msg);
@@ -79,9 +79,16 @@ int rpc_telem_send_battery(rpc_context_t *ctx, const battery_status_t *bat)
     memset(&msg, 0, sizeof(msg));
     msg.msg_type = RPC_MSG_BATTERY;
     msg.timestamp_ms = get_time_ms();
-    msg.data.battery.voltage       = bat->voltage;
-    msg.data.battery.current       = bat->current;
-    msg.data.battery.remaining_pct = (uint8_t)(bat->remaining * 100.0f);
+    msg.data.battery.voltage       = bat->voltage_v;
+    msg.data.battery.current       = 0.0f;  /* no current sensor */
+    /* Estimate remaining from per-cell voltage: 4.2V=100%, 3.3V=0% */
+    float pct = 0.0f;
+    if (bat->cell_count > 0) {
+        pct = (bat->voltage_per_cell - 3.3f) / (4.2f - 3.3f) * 100.0f;
+        if (pct < 0.0f) pct = 0.0f;
+        if (pct > 100.0f) pct = 100.0f;
+    }
+    msg.data.battery.remaining_pct = (uint8_t)pct;
 
     return rpc_send_telemetry(ctx, &msg);
 }

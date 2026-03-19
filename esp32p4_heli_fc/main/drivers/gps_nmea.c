@@ -370,7 +370,7 @@ int gps_init(gps_handle_t *gps, uart_port_t uart_num,
     }
 
     /* Launch parser task */
-    BaseType_t ok = xTaskCreate(gps_task, "gps_parser", 4096, gps, 5, NULL);
+    BaseType_t ok = xTaskCreatePinnedToCore(gps_task, "gps_parser", 4096, gps, 5, NULL, 0);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "failed to create GPS parser task");
         return -1;

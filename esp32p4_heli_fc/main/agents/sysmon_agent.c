@@ -35,6 +35,9 @@
 #include "../uorb/topics/vehicle_status.h"
 #include "../rpc/rpc_core.h"
 #include "../rpc/rpc_messages.h"
+#include "../rpc/rpc_telemetry.h"
+#include "../uorb/topics/vehicle_attitude.h"
+#include "../uorb/topics/vehicle_local_position.h"
 
 static const char *TAG = "sysmon_agent";
 
@@ -133,6 +136,10 @@ static void sysmon_task(void *param)
     orb_subscription_t *mag_sub  = orb_subscribe(ORB_ID_SENSOR_MAG);
     orb_subscription_t *gps_sub  = orb_subscribe(ORB_ID_SENSOR_GPS);
     orb_subscription_t *rc_sub   = orb_subscribe(ORB_ID_RC_CHANNELS);
+
+    /* Subscribe to topics for RPC telemetry forwarding */
+    orb_subscription_t *att_sub    = orb_subscribe(ORB_ID_VEHICLE_ATTITUDE);
+    orb_subscription_t *lpos_sub   = orb_subscribe(ORB_ID_VEHICLE_LOCAL_POSITION);
 
     /* State */
     arm_state_t     arm_state     = ARM_STATE_DISARMED;
@@ -302,6 +309,33 @@ static void sysmon_task(void *param)
         status_msg.battery_ok = !batt_msg.warning && !batt_msg.critical;
 
         orb_publish(ORB_ID_VEHICLE_STATUS, &status_msg);
+
+        /* ---- 5b. Forward telemetry via RPC to Core 1 ---- */
+        if (rpc != NULL) {
+            /* Attitude (every cycle = 10 Hz) */
+            vehicle_attitude_t att_data;
+            if (orb_copy(att_sub, &att_data) == 0) {
+                rpc_telem_send_attitude(rpc, &att_data);
+            }
+
+            /* GPS */
+            sensor_gps_t gps_data;
+            if (orb_copy(gps_sub, &gps_data) == 0) {
+                rpc_telem_send_gps(rpc, &gps_data);
+            }
+
+            /* Altitude from local position */
+            vehicle_local_position_t lpos_data;
+            if (orb_copy(lpos_sub, &lpos_data) == 0) {
+                rpc_telem_send_altitude(rpc, &lpos_data);
+            }
+
+            /* Battery */
+            rpc_telem_send_battery(rpc, &batt_msg);
+
+            /* Vehicle status */
+            rpc_telem_send_status(rpc, &status_msg);
+        }
 
         /* ---- 6. LED indication ---- */
         led_counter++;

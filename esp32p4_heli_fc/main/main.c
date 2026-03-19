@@ -7,9 +7,9 @@
  *   - Actuator Agent (500Hz PWM output)
  *   - System Monitor Agent (10Hz health/battery/failsafe)
  *
- * CPU1 (HP Core 1): Communication tasks (esp32p4halow project)
+ * CPU1 (HP Core 1): Communication tasks
  *   - HaLow WiFi + MAVLink + GCS bridge
- *   - Connected via RPC queues
+ *   - Shares RPC queues with Core 0 via single rpc_context_t
  */
 
 #include <stdio.h>
@@ -29,6 +29,7 @@
 #include "agents/flight_ctrl_agent.h"
 #include "agents/actuator_agent.h"
 #include "agents/sysmon_agent.h"
+#include "halow_comm.h"
 
 static const char *TAG = "HELI_FC";
 
@@ -114,8 +115,12 @@ void app_main(void)
              FC_CORE, SYSMON_TASK_PRIORITY);
     sysmon_agent_start(&g_rpc_ctx);
 
-    /* Step 7: Report startup complete */
-    ESP_LOGI(TAG, "All flight controller agents started successfully.");
+    /* Step 7: Start HaLow communication on Core 1 (shared RPC context) */
+    ESP_LOGI(TAG, "Starting HaLow communication on Core %d...", COMM_CORE);
+    halow_comm_start(&g_rpc_ctx);
+
+    /* Step 8: Report startup complete */
+    ESP_LOGI(TAG, "All agents started successfully.");
     ESP_LOGI(TAG, "Free heap after init: %lu bytes", (unsigned long)esp_get_free_heap_size());
     ESP_LOGI(TAG, "System ready. Waiting for arm command from GCS...");
 
