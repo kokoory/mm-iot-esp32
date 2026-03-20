@@ -5,13 +5,13 @@
 #include "driver/uart.h"
 #include "esp_adc/adc_oneshot.h"
 
-// IMU (ICM-42688-P) - SPI3
+// IMU (ISM330DHC) - SPI3
 #define PIN_IMU_SPI_SCK     4
 #define PIN_IMU_SPI_MOSI    5
 #define PIN_IMU_SPI_MISO    6
 #define PIN_IMU_SPI_CS      7
 #define IMU_SPI_HOST        SPI3_HOST
-#define IMU_SPI_FREQ_HZ     10000000  // 10MHz
+#define IMU_SPI_FREQ_HZ     8000000   // 8MHz (ISM330DHC max 10MHz)
 
 // I2C0 (Baro + Mag)
 #define PIN_I2C_SDA         8
@@ -43,7 +43,7 @@
 
 // I2C Addresses
 #define BMP390_I2C_ADDR     0x77
-#define QMC5883L_I2C_ADDR   0x0D
+#define LIS3MDL_I2C_ADDR    0x1E
 
 // Task config
 #define SENSOR_TASK_PRIORITY    6

@@ -2,9 +2,9 @@
  * Sensor Manager Agent Implementation
  *
  * Runs on Core 0 at 1 kHz.
- *   - IMU (ICM-42688-P via SPI) read every cycle (1 kHz)
+ *   - IMU (ISM330DHC via SPI) read every cycle (1 kHz)
  *   - Barometer (BMP390 via I2C) read every 10th cycle (100 Hz)
- *   - Magnetometer (QMC5883L via I2C) read every 10th cycle, offset by 5 (100 Hz)
+ *   - Magnetometer (LIS3MDL via I2C) read every 10th cycle, offset by 5 (100 Hz)
  *   - GPS (NMEA via UART) read in gps_init internal task, polled here for publishing
  *   - AHRS update every cycle with IMU data
  *   - Altitude estimator updated with baro and accel data
@@ -30,9 +30,9 @@
 #include "../uorb/topics/sensor_gps.h"
 #include "../uorb/topics/vehicle_attitude.h"
 #include "../uorb/topics/vehicle_local_position.h"
-#include "../drivers/icm42688p.h"
+#include "../drivers/ism330dhc.h"
 #include "../drivers/bmp390.h"
-#include "../drivers/qmc5883l.h"
+#include "../drivers/lis3mdl.h"
 #include "../drivers/gps_nmea.h"
 #include "../estimator/ahrs.h"
 #include "../estimator/altitude_estimator.h"
@@ -40,9 +40,9 @@
 static const char *TAG = "sensor_agent";
 
 /* Sensor instances */
-static icm42688p_t  s_imu;
+static ism330dhc_t  s_imu;
 static bmp390_t     s_baro;
-static qmc5883l_t   s_mag;
+static lis3mdl_t    s_mag;
 static gps_handle_t s_gps;
 
 /* Estimators */
@@ -114,12 +114,12 @@ static void sensor_task(void *param)
     }
 
     /* ---- Initialize sensors ---- */
-    bool imu_ok = (icm42688p_init(&s_imu, IMU_SPI_HOST, PIN_IMU_SPI_CS) == 0);
+    bool imu_ok = (ism330dhc_init(&s_imu, IMU_SPI_HOST, PIN_IMU_SPI_CS) == 0);
     if (imu_ok) {
-        imu_ok = (icm42688p_configure(&s_imu) == 0);
+        imu_ok = (ism330dhc_configure(&s_imu) == 0);
     }
     if (imu_ok) {
-        ESP_LOGI(TAG, "IMU (ICM-42688-P) initialized");
+        ESP_LOGI(TAG, "IMU (ISM330DHC) initialized");
     } else {
         ESP_LOGE(TAG, "IMU init/configure FAILED");
     }
@@ -134,12 +134,12 @@ static void sensor_task(void *param)
         ESP_LOGE(TAG, "Baro init/configure FAILED");
     }
 
-    bool mag_ok = (qmc5883l_init(&s_mag, i2c_bus, QMC5883L_I2C_ADDR) == 0);
+    bool mag_ok = (lis3mdl_init(&s_mag, i2c_bus, LIS3MDL_I2C_ADDR) == 0);
     if (mag_ok) {
-        mag_ok = (qmc5883l_configure(&s_mag) == 0);
+        mag_ok = (lis3mdl_configure(&s_mag) == 0);
     }
     if (mag_ok) {
-        ESP_LOGI(TAG, "Mag (QMC5883L) initialized");
+        ESP_LOGI(TAG, "Mag (LIS3MDL) initialized");
     } else {
         ESP_LOGE(TAG, "Mag init/configure FAILED");
     }
@@ -177,7 +177,7 @@ static void sensor_task(void *param)
             sensor_imu_t imu_msg;
             float accel[3], gyro[3], temp;
 
-            if (icm42688p_read(&s_imu, accel, gyro, &temp) == 0) {
+            if (ism330dhc_read(&s_imu, accel, gyro, &temp) == 0) {
                 imu_msg.timestamp_us = now_us;
                 imu_msg.accel_x = accel[0];
                 imu_msg.accel_y = accel[1];
@@ -248,7 +248,7 @@ static void sensor_task(void *param)
         /* ---- Magnetometer: every 10th cycle, offset by 5 (100 Hz) ---- */
         if (mag_ok && (cycle % 10) == 5) {
             float mag[3];
-            if (qmc5883l_read(&s_mag, mag) == 0) {
+            if (lis3mdl_read(&s_mag, mag) == 0) {
                 s_mag_data[0] = mag[0];
                 s_mag_data[1] = mag[1];
                 s_mag_data[2] = mag[2];
