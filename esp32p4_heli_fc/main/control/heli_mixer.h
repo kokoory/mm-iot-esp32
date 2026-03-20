@@ -29,6 +29,8 @@ typedef struct {
     float throttle_curve[5];     /* throttle at 0%, 25%, 50%, 75%, 100% collective */
     /* Collective pitch curve (5 points) */
     float collective_curve[5];   /* collective pitch at 0%, 25%, 50%, 75%, 100% stick */
+    /* Tail feedforward: compensate torque changes from collective/throttle */
+    float tail_coll_ff;          /* feedforward gain: collective -> tail ESC */
 } heli_mixer_config_t;
 
 /**

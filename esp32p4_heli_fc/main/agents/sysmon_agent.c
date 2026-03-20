@@ -58,13 +58,24 @@ static const char *TAG = "sysmon_agent";
 
 /* ------------------------------------------------------------------ */
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
+static adc_channel_t s_batt_adc_channel = ADC_CHANNEL_0;
 
 static int init_adc(void)
 {
+    /* Discover ADC unit and channel for the battery GPIO at runtime */
+    adc_unit_t adc_unit;
+    esp_err_t err = adc_oneshot_io_to_channel(PIN_BATT_ADC, &adc_unit, &s_batt_adc_channel);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GPIO %d is not a valid ADC pin: %s", PIN_BATT_ADC, esp_err_to_name(err));
+        return -1;
+    }
+    ESP_LOGI(TAG, "Battery ADC: GPIO %d -> unit %d, channel %d",
+             PIN_BATT_ADC, adc_unit, s_batt_adc_channel);
+
     adc_oneshot_unit_init_cfg_t unit_cfg = {
-        .unit_id = ADC_UNIT_1,
+        .unit_id = adc_unit,
     };
-    esp_err_t err = adc_oneshot_new_unit(&unit_cfg, &s_adc_handle);
+    err = adc_oneshot_new_unit(&unit_cfg, &s_adc_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ADC unit init failed: %s", esp_err_to_name(err));
         return -1;
@@ -74,7 +85,7 @@ static int init_adc(void)
         .atten = BATT_ADC_ATTEN,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
-    err = adc_oneshot_config_channel(s_adc_handle, BATT_ADC_CHANNEL, &chan_cfg);
+    err = adc_oneshot_config_channel(s_adc_handle, s_batt_adc_channel, &chan_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ADC channel config failed: %s", esp_err_to_name(err));
         return -1;
@@ -87,7 +98,7 @@ static int init_adc(void)
 static float read_battery_voltage(void)
 {
     int raw = 0;
-    esp_err_t err = adc_oneshot_read(s_adc_handle, BATT_ADC_CHANNEL, &raw);
+    esp_err_t err = adc_oneshot_read(s_adc_handle, s_batt_adc_channel, &raw);
     if (err != ESP_OK) {
         return 0.0f;
     }
@@ -201,6 +212,9 @@ static void sysmon_task(void *param)
         orb_publish(ORB_ID_BATTERY_STATUS, &batt_msg);
 
         /* ---- 2. Check sensor health (timestamp freshness) ---- */
+        /* Save GPS data for reuse in RPC forwarding (avoid double-consume) */
+        sensor_gps_t gps_data;
+        bool gps_updated = false;
         {
             sensor_imu_t imu;
             if (orb_copy(imu_sub, &imu) == 0) {
@@ -214,9 +228,9 @@ static void sysmon_task(void *param)
             if (orb_copy(mag_sub, &mag) == 0) {
                 last_mag_ts = mag.timestamp_us;
             }
-            sensor_gps_t gps;
-            if (orb_copy(gps_sub, &gps) == 0) {
-                last_gps_ts = gps.timestamp_us;
+            if (orb_copy(gps_sub, &gps_data) == 0) {
+                last_gps_ts = gps_data.timestamp_us;
+                gps_updated = true;
             }
             rc_channels_t rc;
             if (orb_copy(rc_sub, &rc) == 0) {
@@ -230,19 +244,19 @@ static void sysmon_task(void *param)
         bool gps_ok  = (last_gps_ts > 0)  && ((now_us - last_gps_ts) < SENSOR_TIMEOUT_US);
         bool rc_ok   = (last_rc_ts > 0)   && ((now_us - last_rc_ts) < RC_TIMEOUT_US);
 
-        /* ---- 3. Determine failsafe state ---- */
+        /* ---- 3. Determine failsafe state (highest severity wins) ---- */
+        /* Priority: SENSOR_FAILURE > BATTERY_CRITICAL > RC_LOST > BATTERY_LOW > NONE */
         failsafe = FAILSAFE_NONE;
 
-        if (batt_msg.critical) {
-            failsafe = FAILSAFE_BATTERY_CRITICAL;
-        } else if (batt_msg.warning) {
+        if (batt_msg.warning) {
             failsafe = FAILSAFE_BATTERY_LOW;
         }
-
         if (!rc_ok && arm_state == ARM_STATE_ARMED) {
             failsafe = FAILSAFE_RC_LOST;
         }
-
+        if (batt_msg.critical) {
+            failsafe = FAILSAFE_BATTERY_CRITICAL;
+        }
         if (!imu_ok) {
             failsafe = FAILSAFE_SENSOR_FAILURE;
         }
@@ -250,7 +264,8 @@ static void sysmon_task(void *param)
         /* ---- 4. Arm/disarm logic ---- */
         /* Auto-disarm on critical failsafe */
         if (failsafe == FAILSAFE_BATTERY_CRITICAL ||
-            failsafe == FAILSAFE_SENSOR_FAILURE) {
+            failsafe == FAILSAFE_SENSOR_FAILURE ||
+            failsafe == FAILSAFE_RC_LOST) {
             if (arm_state == ARM_STATE_ARMED) {
                 ESP_LOGW(TAG, "FAILSAFE: auto-disarming (failsafe=%d)", failsafe);
                 arm_state = ARM_STATE_DISARMED;
@@ -267,6 +282,8 @@ static void sysmon_task(void *param)
                         /* Safety checks for arming */
                         if (!imu_ok) {
                             ESP_LOGW(TAG, "ARM rejected: IMU not healthy");
+                        } else if (!rc_ok) {
+                            ESP_LOGW(TAG, "ARM rejected: no RC signal");
                         } else if (failsafe != FAILSAFE_NONE &&
                                    failsafe != FAILSAFE_BATTERY_LOW) {
                             ESP_LOGW(TAG, "ARM rejected: failsafe active (%d)", failsafe);
@@ -288,6 +305,19 @@ static void sysmon_task(void *param)
                         ESP_LOGI(TAG, "Flight mode set to %d via RPC", flight_mode);
                     }
                     break;
+
+                case RPC_CMD_RC_OVERRIDE: {
+                    /* Publish RC override from GCS to uORB RC_CHANNELS topic */
+                    rc_channels_t rc_msg = {0};
+                    rc_msg.timestamp_us = now_us;
+                    rc_msg.channel_count = 8;
+                    rc_msg.signal_lost = false;
+                    for (int i = 0; i < 8; i++) {
+                        rc_msg.channels[i] = (float)cmd.data.rc_override.channels[i] / 1000.0f;
+                    }
+                    orb_publish(ORB_ID_RC_CHANNELS, &rc_msg);
+                    break;
+                }
 
                 default:
                     break;
@@ -318,9 +348,8 @@ static void sysmon_task(void *param)
                 rpc_telem_send_attitude(rpc, &att_data);
             }
 
-            /* GPS */
-            sensor_gps_t gps_data;
-            if (orb_copy(gps_sub, &gps_data) == 0) {
+            /* GPS (reuse data from health check to avoid double-consume) */
+            if (gps_updated) {
                 rpc_telem_send_gps(rpc, &gps_data);
             }
 

@@ -33,8 +33,9 @@
 #define PIN_MAIN_ESC        16
 
 // Battery ADC
+// NOTE: Use adc_oneshot_io_to_channel() at runtime for correct channel mapping.
+// ADC channel assignment varies per ESP32 variant; do NOT hardcode channel numbers.
 #define PIN_BATT_ADC        17
-#define BATT_ADC_CHANNEL    ADC_CHANNEL_0
 #define BATT_ADC_ATTEN      ADC_ATTEN_DB_12
 #define BATT_VOLTAGE_DIVIDER_RATIO  11.0f  // voltage divider
 

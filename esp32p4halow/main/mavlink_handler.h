@@ -15,8 +15,7 @@ typedef struct {
     uint8_t heartbeat_hz;   /* Heartbeat rate (default 1) */
     uint8_t attitude_hz;    /* Attitude rate (default 10) */
     uint8_t gps_hz;         /* GPS rate (default 5) */
-    uint8_t battery_hz;     /* Battery rate (default 2) */
-    uint8_t sys_status_hz;  /* System status rate (default 1) */
+    uint8_t battery_hz;     /* Battery + SYS_STATUS rate (default 2) */
     uint8_t vfr_hud_hz;     /* VFR HUD rate (default 2) */
 } mavlink_handler_config_t;
 

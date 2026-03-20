@@ -13,6 +13,10 @@ void pid_init(pid_controller_t *pid, float kp, float ki, float kd, float dt)
     pid->dt = dt;
     pid->integral = 0.0f;
     pid->prev_error = 0.0f;
+    pid->prev_measurement = 0.0f;
+    pid->d_filtered = 0.0f;
+    pid->d_filter_alpha = 0.2f;  /* 20% new value, 80% old — cuts high-freq noise */
+    pid->has_prev_measurement = false;
     pid->output_min = -1.0f;
     pid->output_max = 1.0f;
     pid->integral_max = 1.0f;
@@ -41,14 +45,19 @@ float pid_update(pid_controller_t *pid, float setpoint, float measurement)
     pid->integral = constrain_f(pid->integral, -pid->integral_max, pid->integral_max);
     float i_term = pid->ki * pid->integral;
 
-    /* Derivative term (on error) */
+    /* Derivative term on measurement (avoids derivative kick on setpoint change) */
     float derivative = 0.0f;
-    if (pid->dt > 0.0f) {
-        derivative = (error - pid->prev_error) / pid->dt;
+    if (pid->dt > 0.0f && pid->has_prev_measurement) {
+        float raw_deriv = -(measurement - pid->prev_measurement) / pid->dt;
+        /* Low-pass filter on derivative to reduce high-frequency noise */
+        pid->d_filtered += pid->d_filter_alpha * (raw_deriv - pid->d_filtered);
+        derivative = pid->d_filtered;
     }
     float d_term = pid->kd * derivative;
 
     pid->prev_error = error;
+    pid->prev_measurement = measurement;
+    pid->has_prev_measurement = true;
 
     /* Sum and clamp output */
     float output = p_term + i_term + d_term;
@@ -74,4 +83,7 @@ void pid_reset(pid_controller_t *pid)
 {
     pid->integral = 0.0f;
     pid->prev_error = 0.0f;
+    pid->prev_measurement = 0.0f;
+    pid->d_filtered = 0.0f;
+    pid->has_prev_measurement = false;
 }

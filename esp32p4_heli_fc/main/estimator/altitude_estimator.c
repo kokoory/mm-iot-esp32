@@ -19,28 +19,38 @@ void alt_estimator_init(alt_estimator_t *est)
     est->climb_rate = 0.0f;
     est->alpha = DEFAULT_ALPHA;
     est->baro_alt_prev = 0.0f;
+    est->baro_ts_prev = 0;
     est->initialized = false;
     est->alt_offset = 0.0f;
 }
 
-void alt_estimator_update_baro(alt_estimator_t *est, float alt_baro)
+void alt_estimator_update_baro(alt_estimator_t *est, float alt_baro, uint64_t timestamp_us)
 {
     if (!est->initialized) {
         /* First reading: set offset so altitude starts at zero */
         est->alt_offset = alt_baro;
         est->baro_alt_prev = alt_baro;
+        est->baro_ts_prev = timestamp_us;
         est->altitude = 0.0f;
         est->climb_rate = 0.0f;
         est->initialized = true;
         return;
     }
 
+    /* Compute actual dt from timestamps */
+    float baro_dt = (float)(timestamp_us - est->baro_ts_prev) * 1.0e-6f;
+    if (baro_dt <= 0.0f || baro_dt > 1.0f) {
+        /* Sanity: skip if dt is invalid or too large (>1s gap) */
+        est->baro_ts_prev = timestamp_us;
+        est->baro_alt_prev = alt_baro;
+        return;
+    }
+
     /* Relative altitude from barometer */
     float baro_alt_rel = alt_baro - est->alt_offset;
 
-    /* Barometer-derived climb rate (finite difference, will be smoothed) */
-    /* Note: baro update rate is ~100Hz so this is somewhat noisy */
-    float baro_climb = (alt_baro - est->baro_alt_prev) * 100.0f; /* approximate */
+    /* Barometer-derived climb rate (finite difference using measured dt) */
+    float baro_climb = (alt_baro - est->baro_alt_prev) / baro_dt;
 
     /* Complementary filter for altitude:
      * Trust accelerometer-integrated path at high freq (alpha),
@@ -53,6 +63,7 @@ void alt_estimator_update_baro(alt_estimator_t *est, float alt_baro)
                       (1.0f - est->alpha) * baro_climb;
 
     est->baro_alt_prev = alt_baro;
+    est->baro_ts_prev = timestamp_us;
 }
 
 void alt_estimator_update_accel(alt_estimator_t *est, float accel_z, float dt)

@@ -30,6 +30,7 @@
 #include "../uorb/topics/sensor_gps.h"
 #include "../uorb/topics/vehicle_attitude.h"
 #include "../uorb/topics/vehicle_local_position.h"
+#include "../uorb/topics/rc_channels.h"
 #include "../drivers/ism330dhc.h"
 #include "../drivers/bmp390.h"
 #include "../drivers/lis3mdl.h"
@@ -164,13 +165,21 @@ static void sensor_task(void *param)
     orb_advertise(ORB_ID_VEHICLE_ATTITUDE, sizeof(vehicle_attitude_t));
     orb_advertise(ORB_ID_VEHICLE_LOCAL_POSITION, sizeof(vehicle_local_position_t));
 
+    /* RC_CHANNELS: advertise topic. Currently populated only via RPC RC override
+     * from GCS. A hardware RC receiver driver (SBUS/PPM) should publish here
+     * once integrated. */
+    orb_advertise(ORB_ID_RC_CHANNELS, sizeof(rc_channels_t));
+
     /* ---- Main loop at 1 kHz ---- */
     TickType_t last_wake = xTaskGetTickCount();
     uint32_t cycle = 0;
-    const float dt = 0.001f;  /* 1 kHz -> 1 ms */
+    uint64_t prev_us = (uint64_t)esp_timer_get_time();
 
     while (1) {
         uint64_t now_us = (uint64_t)esp_timer_get_time();
+        float dt = (float)(now_us - prev_us) * 1.0e-6f;
+        if (dt <= 0.0f || dt > 0.01f) dt = 0.001f;  /* sanity clamp */
+        prev_us = now_us;
 
         /* ---- IMU: every cycle (1 kHz) ---- */
         if (imu_ok) {
@@ -241,7 +250,7 @@ static void sensor_task(void *param)
                 orb_publish(ORB_ID_SENSOR_BARO, &baro_msg);
 
                 /* Update altitude estimator with barometer */
-                alt_estimator_update_baro(&s_alt_est, alt_msl);
+                alt_estimator_update_baro(&s_alt_est, alt_msl, now_us);
             }
         }
 

@@ -40,8 +40,8 @@ static const char *TAG = "flight_ctrl";
 #define MAX_PITCH_ANGLE  DEG_TO_RAD(45.0f)
 #define MAX_YAW_RATE     DEG_TO_RAD(180.0f)  /* rad/s */
 
-/* Controller timestep (500 Hz) */
-#define CTRL_DT  0.002f
+/* Nominal controller timestep (500 Hz) — used for init, overridden by measured dt */
+#define CTRL_DT_NOMINAL  0.002f
 
 /* ------------------------------------------------------------------ */
 static void flight_ctrl_task(void *param)
@@ -65,10 +65,10 @@ static void flight_ctrl_task(void *param)
     attitude_control_init(&att_ctrl);
 
     rate_controller_t rate_ctrl;
-    rate_control_init(&rate_ctrl, CTRL_DT);
+    rate_control_init(&rate_ctrl, CTRL_DT_NOMINAL);
 
     pos_controller_t pos_ctrl;
-    pos_control_init(&pos_ctrl, CTRL_DT);
+    pos_control_init(&pos_ctrl, CTRL_DT_NOMINAL);
 
     /* Local state */
     vehicle_attitude_t       att     = {0};
@@ -78,13 +78,19 @@ static void flight_ctrl_task(void *param)
 
     /* Altitude hold setpoint, captured when entering ALT_HOLD */
     float alt_hold_sp = 0.0f;
+    float yaw_sp = 0.0f;       /* persistent yaw setpoint */
+    bool yaw_sp_initialized = false;
     flight_mode_t prev_mode = FLIGHT_MODE_MANUAL;
 
     /* ---- Main loop at 500 Hz ---- */
     TickType_t last_wake = xTaskGetTickCount();
+    uint64_t prev_us = (uint64_t)esp_timer_get_time();
 
     while (1) {
         uint64_t now_us = (uint64_t)esp_timer_get_time();
+        float ctrl_dt = (float)(now_us - prev_us) * 1.0e-6f;
+        if (ctrl_dt <= 0.0f || ctrl_dt > 0.02f) ctrl_dt = CTRL_DT_NOMINAL;
+        prev_us = now_us;
 
         /* ---- Read latest data from subscriptions ---- */
         orb_copy(att_sub, &att);
@@ -107,6 +113,7 @@ static void flight_ctrl_task(void *param)
             /* Reset controllers when disarmed */
             rate_control_reset(&rate_ctrl);
             pos_control_reset(&pos_ctrl);
+            yaw_sp_initialized = false;
             prev_mode = status.flight_mode;
             vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
             continue;
@@ -135,10 +142,17 @@ static void flight_ctrl_task(void *param)
 
         case FLIGHT_MODE_STABILIZE: {
             /* RC sticks -> attitude setpoints -> attitude ctrl -> rate ctrl */
+            if (!yaw_sp_initialized) {
+                yaw_sp = att.yaw;
+                yaw_sp_initialized = true;
+            }
+            /* Yaw: integrate RC yaw rate command into persistent setpoint */
+            yaw_sp += rc_yaw * MAX_YAW_RATE * ctrl_dt;
+
             float att_sp[3];
             att_sp[0] = rc_roll  * MAX_ROLL_ANGLE;    /* roll angle setpoint */
             att_sp[1] = rc_pitch * MAX_PITCH_ANGLE;   /* pitch angle setpoint */
-            att_sp[2] = att.yaw + rc_yaw * MAX_YAW_RATE * CTRL_DT; /* yaw rate-like */
+            att_sp[2] = yaw_sp;
 
             float att_meas[3] = {att.roll, att.pitch, att.yaw};
 
@@ -173,7 +187,7 @@ static void flight_ctrl_task(void *param)
             if (fabsf(rc_coll) > coll_deadzone) {
                 /* Modify altitude setpoint based on stick displacement */
                 float climb_cmd = rc_coll * 2.0f; /* m/s max climb rate from stick */
-                alt_hold_sp += climb_cmd * CTRL_DT;
+                alt_hold_sp += climb_cmd * ctrl_dt;
             }
 
             /* Altitude controller -> collective */
@@ -182,10 +196,16 @@ static void flight_ctrl_task(void *param)
                                         pos.climb_rate, &collective_out);
 
             /* Attitude control (same as STABILIZE for roll/pitch/yaw) */
+            if (!yaw_sp_initialized) {
+                yaw_sp = att.yaw;
+                yaw_sp_initialized = true;
+            }
+            yaw_sp += rc_yaw * MAX_YAW_RATE * ctrl_dt;
+
             float att_sp[3];
             att_sp[0] = rc_roll  * MAX_ROLL_ANGLE;
             att_sp[1] = rc_pitch * MAX_PITCH_ANGLE;
-            att_sp[2] = att.yaw + rc_yaw * MAX_YAW_RATE * CTRL_DT;
+            att_sp[2] = yaw_sp;
 
             float att_meas[3] = {att.roll, att.pitch, att.yaw};
             float rate_sp[3];

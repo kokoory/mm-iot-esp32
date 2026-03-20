@@ -10,6 +10,10 @@ typedef struct {
     float kp, ki, kd;
     float integral;
     float prev_error;
+    float prev_measurement;     /* for derivative-on-measurement */
+    float d_filtered;           /* low-pass filtered derivative */
+    float d_filter_alpha;       /* derivative LP filter coefficient (0..1, lower = more filtering) */
+    bool  has_prev_measurement; /* true after first update */
     float output_min, output_max;
     float integral_max;
     float dt;

@@ -55,7 +55,6 @@ static uint32_t s_last_heartbeat_ms = 0;
 static uint32_t s_last_attitude_ms  = 0;
 static uint32_t s_last_gps_ms       = 0;
 static uint32_t s_last_battery_ms   = 0;
-static uint32_t s_last_sys_status_ms = 0;
 static uint32_t s_last_vfr_hud_ms   = 0;
 
 /* ── Helpers ──────────────────────────────────────────────────── */
@@ -411,8 +410,7 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
         s_config.attitude_hz   = 10;
         s_config.gps_hz        = 5;
         s_config.battery_hz    = 2;
-        s_config.sys_status_hz = 1;
-        s_config.vfr_hud_hz    = 2;
+        s_config.vfr_hud_hz   = 2;
     }
 
     mavlink_parser_init(&s_parser);
@@ -429,7 +427,6 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     s_last_attitude_ms   = now;
     s_last_gps_ms        = now;
     s_last_battery_ms    = now;
-    s_last_sys_status_ms = now;
     s_last_vfr_hud_ms    = now;
 
     ESP_LOGI(TAG, "MAVLink handler initialized (HB=%dHz ATT=%dHz GPS=%dHz BAT=%dHz)",

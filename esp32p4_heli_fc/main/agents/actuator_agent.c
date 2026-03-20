@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "driver/mcpwm_prelude.h"
 
+
 #include "../common/board_config.h"
 #include "../common/flight_modes.h"
 #include "../common/math_utils.h"
@@ -41,6 +42,9 @@ static const char *TAG = "actuator_agent";
 /* Safe (disarmed) values */
 #define SERVO_SAFE_US   1500
 #define ESC_SAFE_US     1000
+
+/* Watchdog: if no new actuator_controls for this long, disarm outputs */
+#define ACTUATOR_TIMEOUT_US  100000  /* 100 ms */
 
 /* MCPWM handles */
 static mcpwm_timer_handle_t     s_timers[NUM_PWM_CHANNELS];
@@ -192,11 +196,17 @@ static void actuator_task(void *param)
     TickType_t last_wake = xTaskGetTickCount();
 
     while (1) {
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+
         /* Read latest data */
         orb_copy(act_sub, &act);
         orb_copy(stat_sub, &status);
 
-        if (status.arm_state == ARM_STATE_ARMED) {
+        /* Watchdog: check actuator_controls freshness */
+        bool act_timeout = (act.timestamp_us > 0) &&
+                           ((now_us - act.timestamp_us) > ACTUATOR_TIMEOUT_US);
+
+        if (status.arm_state == ARM_STATE_ARMED && !act_timeout) {
             /* Armed: run mixer and output */
             heli_mixer_output_t mix_out;
             heli_mixer_update(&mixer_config, &act, &mix_out);

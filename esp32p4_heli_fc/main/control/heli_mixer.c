@@ -49,6 +49,7 @@ void heli_mixer_init(heli_mixer_config_t *config)
     config->esc_max_us        = 2000.0f;
     config->tail_esc_idle_us  = 1100.0f;
     config->main_esc_idle_us  = 1100.0f;
+    config->tail_coll_ff      = 0.3f;   /* feedforward: 30% of collective -> tail */
 
     /* Normal mode throttle curve */
     config->throttle_curve[0] = 0.0f;
@@ -115,10 +116,12 @@ void heli_mixer_update(const heli_mixer_config_t *config,
     output->servo2_us = config->servo_center_us + servo2_norm * config->servo_range_us;
     output->servo3_us = config->servo_center_us + servo3_norm * config->servo_range_us;
 
-    /* Tail ESC: map yaw control [-1, 1] to ESC range [esc_min, esc_max] */
-    float yaw_normalized = (yaw_in + 1.0f) * 0.5f;  /* 0..1 */
+    /* Tail ESC: yaw control + collective feedforward to compensate main rotor torque */
+    float tail_ff = collective * config->tail_coll_ff;
+    float tail_cmd = constrain_f(yaw_in + tail_ff, -1.0f, 1.0f);
+    float tail_normalized = (tail_cmd + 1.0f) * 0.5f;  /* 0..1 */
     output->tail_esc_us = config->esc_min_us +
-                          yaw_normalized * (config->esc_max_us - config->esc_min_us);
+                          tail_normalized * (config->esc_max_us - config->esc_min_us);
 
     /* Main ESC: throttle from throttle curve */
     output->main_esc_us = config->esc_min_us +
