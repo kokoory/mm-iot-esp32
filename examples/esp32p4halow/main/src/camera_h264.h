@@ -5,7 +5,7 @@
  * frames and stream them over HTTP via Wi-Fi HaLow.
  *
  * Reference hardware: ESP32-P4 with MIPI-CSI camera
- * (e.g., IMX219 / Raspberry Pi Camera v2, or similar 2-lane MIPI camera)
+ * (e.g., OV5647 / Raspberry Pi Camera v1, or similar 2-lane MIPI camera)
  */
 
 #pragma once

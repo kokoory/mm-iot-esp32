@@ -33,13 +33,13 @@ static const char *TAG = "camera_h264";
 /*
  * ESP32-P4 MIPI-CSI Camera Configuration
  *
- * ESP32-P4 MIPI-CSI connector with IMX219 (Raspberry Pi Camera v2).
+ * ESP32-P4 MIPI-CSI connector with OV5647 (Raspberry Pi Camera v1).
  * MIPI-CSI uses dedicated differential signal pairs:
  *   - CSI_CLK_P/N  (clock lane)
  *   - CSI_D0_P/N   (data lane 0)
  *   - CSI_D1_P/N   (data lane 1)
  * These are NOT regular GPIO pins - they are dedicated MIPI PHY pins.
- * Camera I2C (SCCB): SCL=GPIO33, SDA=GPIO22
+ * Camera I2C (OV5647 SCCB): SCL=GPIO33, SDA=GPIO22
  */
 
 /* Frame configuration */
