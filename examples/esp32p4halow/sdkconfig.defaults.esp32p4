@@ -1,20 +1,20 @@
 #
 # ESP32-P4 HaLow Pin Configuration
-# Waveshare ESP32-P4-WIFI6 + Wio-WM6180 HaLow Module
 #
-# Avoids: GPIO7-13 (I2S/I2C audio), GPIO14-19 (SDIO→C6),
-#         GPIO24-25 (USB-JTAG), GPIO34-38 (strapping), GPIO54 (C6 reset)
+# Available GPIOs: 2,3,4,5,20,21,22,23,26,27,32,33,46,47,48,49,50
 #
-# HaLow SPI pins (directly wired to WM6180 module)
+# HaLow SPI pins
 CONFIG_MM_RESET_N=20
 CONFIG_MM_WAKE=23
 CONFIG_MM_BUSY=32
-CONFIG_MM_SPI_SCK=0
+CONFIG_MM_SPI_SCK=5
 CONFIG_MM_SPI_MOSI=3
 CONFIG_MM_SPI_MISO=2
 CONFIG_MM_SPI_CS=4
-CONFIG_MM_SPI_IRQ=1
+CONFIG_MM_SPI_IRQ=21
 CONFIG_MM_BCF_FILE="bcf_mf08651_us.mbin"
 
 # MIPI-CSI camera uses dedicated MIPI lanes (not GPIO)
-# UART for MAVLink: TX=GPIO6, RX=GPIO5 (on 40-pin header)
+# Camera I2C (IMX219 SCCB): SCL=GPIO33, SDA=GPIO22
+# UART for MAVLink: TX=GPIO26, RX=GPIO27
+# Free GPIOs: 46, 47, 48, 49, 50

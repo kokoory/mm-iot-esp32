@@ -4,8 +4,8 @@
  * Uses the ESP32-P4 hardware H.264 encoder to compress MIPI-CSI camera
  * frames and stream them over HTTP via Wi-Fi HaLow.
  *
- * Reference hardware: Waveshare ESP32-P4-WIFI6 with MIPI-CSI camera
- * (e.g., OV5647, SC2336, or similar 2-lane MIPI camera)
+ * Reference hardware: ESP32-P4 with MIPI-CSI camera
+ * (e.g., IMX219 / Raspberry Pi Camera v2, or similar 2-lane MIPI camera)
  */
 
 #pragma once

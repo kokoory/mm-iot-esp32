@@ -19,8 +19,8 @@ extern "C" {
 
 /* MAVLink UART configuration */
 #define MAVLINK_UART_NUM        1           /* UART1 */
-#define MAVLINK_UART_TX_PIN     6           /* GPIO6 on P4 40-pin header */
-#define MAVLINK_UART_RX_PIN     7           /* GPIO7 on P4 40-pin header */
+#define MAVLINK_UART_TX_PIN     26          /* GPIO26 */
+#define MAVLINK_UART_RX_PIN     27          /* GPIO27 */
 #define MAVLINK_UART_BAUD       921600      /* Pixhawk TELEM baud rate */
 
 /* Ground station UDP configuration */
