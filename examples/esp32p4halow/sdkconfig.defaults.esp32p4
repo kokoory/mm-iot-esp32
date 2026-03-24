@@ -14,7 +14,6 @@ CONFIG_MM_SPI_CS=4
 CONFIG_MM_SPI_IRQ=21
 CONFIG_MM_BCF_FILE="bcf_mf08651_us.mbin"
 
-# MIPI-CSI camera uses dedicated MIPI lanes (not GPIO)
-# Camera I2C (OV5647 SCCB): SCL=GPIO33, SDA=GPIO22
+# MIPI-CSI camera (OV5647): 15-pin FFC ribbon cable (includes I2C)
 # UART for MAVLink: TX=GPIO26, RX=GPIO27
-# Free GPIOs: 46, 47, 48, 49, 50
+# Free GPIOs: 22, 33, 46, 47, 48, 49, 50

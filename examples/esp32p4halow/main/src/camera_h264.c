@@ -39,7 +39,7 @@ static const char *TAG = "camera_h264";
  *   - CSI_D0_P/N   (data lane 0)
  *   - CSI_D1_P/N   (data lane 1)
  * These are NOT regular GPIO pins - they are dedicated MIPI PHY pins.
- * Camera I2C (OV5647 SCCB): SCL=GPIO33, SDA=GPIO22
+ * I2C (SCCB) for sensor config is also routed through the CSI connector.
  */
 
 /* Frame configuration */
