@@ -121,7 +121,12 @@ void app_wlan_start(void)
     status = mmwlan_sta_enable(&sta_args, sta_status_callback);
     MMOSAL_ASSERT(status == MMWLAN_SUCCESS);
 
-    mmosal_semb_wait(link_established, UINT32_MAX);
+    printf("Waiting for DHCP IP assignment...\n");
+    while (!mmosal_semb_wait(link_established, 10000))
+    {
+        printf("  Still waiting for DHCP... (%lu ms elapsed)\n", mmosal_get_time_ms());
+    }
+    printf("DHCP IP assigned successfully.\n");
 }
 
 void app_wlan_stop(void)
