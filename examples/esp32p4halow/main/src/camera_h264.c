@@ -88,7 +88,7 @@ static const char *TAG = "camera_h264";
 #define HAS_HW_JPEG 0
 #endif
 
-#if __has_include("esp_h264_enc.h")
+#if __has_include("esp_h264_enc_single.h")
 #define HAS_HW_H264 1
 #else
 #define HAS_HW_H264 0
@@ -111,8 +111,8 @@ static const char *TAG = "camera_h264";
 #endif
 
 #if HAS_HW_H264
-#include "esp_h264_enc.h"
-#include "esp_h264_enc_single_hw.h"
+#include "esp_h264_enc_single.h"
+#include "esp_h264_enc_param_hw.h"
 #include "esp_h264_types.h"
 #endif
 
@@ -458,7 +458,7 @@ esp_err_t camera_h264_init(void)
         s_cam.h264_handle = NULL;
     }
 #else
-    ESP_LOGW(TAG, "HW H.264 encoder not available (esp_h264_enc.h missing)");
+    ESP_LOGW(TAG, "HW H.264 encoder not available (esp_h264_enc_single.h missing)");
     ESP_LOGW(TAG, "Add espressif/esp_h264 to idf_component.yml");
 #endif
 
