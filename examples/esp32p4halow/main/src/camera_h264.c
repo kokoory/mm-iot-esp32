@@ -16,6 +16,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -25,6 +29,7 @@
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
+#include "esp_netif.h"
 
 #include "camera_h264.h"
 
@@ -68,9 +73,16 @@ static const char *TAG = "camera_h264";
 #define H264_BITRATE        500000       /* 500 Kbps target for HaLow */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
+/* UDP RTP streaming for H.264 */
+#define RTP_PORT            5600         /* QGroundControl standard port */
+#define RTP_PT              96           /* Dynamic payload type for H.264 */
+#define RTP_SSRC            0x12345678
+#define RTP_MTU             1400         /* Max NAL payload per RTP packet */
+#define RTP_HEADER_SIZE     12
+#define RTP_CLOCK_RATE      90000        /* 90kHz for video */
+
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
 #define STREAM_TARGET_FPS   5
-#define STREAM_FRAME_SKIP   (50 / STREAM_TARGET_FPS)
 
 /* Double buffer for raw frames and encoded output */
 #define NUM_BUFS            2
@@ -128,16 +140,18 @@ static struct {
     SemaphoreHandle_t frame_ready;
     SemaphoreHandle_t jpeg_mutex;
 
-    /* H.264 double buffer */
-    uint8_t *h264_buf[NUM_BUFS];
-    size_t h264_size[NUM_BUFS];
-    volatile int h264_write_idx;
-    volatile int h264_read_idx;
-    SemaphoreHandle_t h264_frame_ready;
-    SemaphoreHandle_t h264_mutex;
+    /* H.264 encode output buffer */
+    uint8_t *h264_buf;
+    size_t h264_size;
 
-    /* UYVY conversion buffer for H.264 (HW encoder doesn't accept RGB565) */
-    uint8_t *uyvy_buf;
+    /* YUV conversion buffer for H.264 (HW encoder doesn't accept RGB565) */
+    uint8_t *yuv_buf;
+
+    /* UDP RTP socket for H.264 */
+    int rtp_sock;
+    struct sockaddr_in rtp_dest;
+    uint16_t rtp_seq;
+    uint32_t rtp_timestamp;
 
     /* Raw frame double buffers (RGB565 from ISP) */
     uint8_t *raw_buf[NUM_BUFS];
@@ -169,8 +183,8 @@ static struct {
 /* Forward declarations */
 static void camera_capture_task(void *arg);
 static esp_err_t stream_handler(httpd_req_t *req);
-static esp_err_t h264_stream_handler(httpd_req_t *req);
 static esp_err_t status_handler(httpd_req_t *req);
+static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool marker);
 
 #if HAS_CAMERA_PIPELINE
 
@@ -339,6 +353,129 @@ static void rgb565_to_ouyy_evyy(const uint8_t *rgb565, uint8_t *dst, int width, 
 }
 #endif
 
+/* ========== RTP H.264 over UDP ========== */
+
+/*
+ * Send one H.264 NAL unit via RTP.
+ * If NAL fits in one packet (≤ RTP_MTU): single NAL unit packet.
+ * If NAL is larger: FU-A fragmentation (RFC 6184 §5.8).
+ */
+static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
+{
+    if (s_cam.rtp_sock < 0 || len == 0) return;
+
+    uint8_t pkt[RTP_HEADER_SIZE + RTP_MTU + 2];  /* +2 for FU-A headers */
+
+    if (len <= RTP_MTU) {
+        /* Single NAL unit packet */
+        /* RTP header */
+        pkt[0] = 0x80;  /* V=2, P=0, X=0, CC=0 */
+        pkt[1] = (last_nalu ? 0x80 : 0x00) | RTP_PT;  /* M=marker, PT */
+        pkt[2] = (s_cam.rtp_seq >> 8) & 0xFF;
+        pkt[3] = s_cam.rtp_seq & 0xFF;
+        pkt[4] = (s_cam.rtp_timestamp >> 24) & 0xFF;
+        pkt[5] = (s_cam.rtp_timestamp >> 16) & 0xFF;
+        pkt[6] = (s_cam.rtp_timestamp >> 8) & 0xFF;
+        pkt[7] = s_cam.rtp_timestamp & 0xFF;
+        pkt[8] = (RTP_SSRC >> 24) & 0xFF;
+        pkt[9] = (RTP_SSRC >> 16) & 0xFF;
+        pkt[10] = (RTP_SSRC >> 8) & 0xFF;
+        pkt[11] = RTP_SSRC & 0xFF;
+
+        memcpy(pkt + RTP_HEADER_SIZE, nalu, len);
+        sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + len, 0,
+               (struct sockaddr *)&s_cam.rtp_dest, sizeof(s_cam.rtp_dest));
+        s_cam.rtp_seq++;
+    } else {
+        /* FU-A fragmentation */
+        uint8_t nal_header = nalu[0];
+        uint8_t fu_indicator = (nal_header & 0xE0) | 28;  /* NRI + FU type 28 */
+        uint8_t nal_type = nal_header & 0x1F;
+
+        const uint8_t *payload = nalu + 1;
+        size_t remaining = len - 1;
+        bool first = true;
+
+        while (remaining > 0) {
+            size_t chunk = remaining > (RTP_MTU - 2) ? (RTP_MTU - 2) : remaining;
+            bool last_frag = (chunk == remaining);
+
+            /* RTP header */
+            pkt[0] = 0x80;
+            pkt[1] = ((last_frag && last_nalu) ? 0x80 : 0x00) | RTP_PT;
+            pkt[2] = (s_cam.rtp_seq >> 8) & 0xFF;
+            pkt[3] = s_cam.rtp_seq & 0xFF;
+            pkt[4] = (s_cam.rtp_timestamp >> 24) & 0xFF;
+            pkt[5] = (s_cam.rtp_timestamp >> 16) & 0xFF;
+            pkt[6] = (s_cam.rtp_timestamp >> 8) & 0xFF;
+            pkt[7] = s_cam.rtp_timestamp & 0xFF;
+            pkt[8] = (RTP_SSRC >> 24) & 0xFF;
+            pkt[9] = (RTP_SSRC >> 16) & 0xFF;
+            pkt[10] = (RTP_SSRC >> 8) & 0xFF;
+            pkt[11] = RTP_SSRC & 0xFF;
+
+            /* FU indicator + FU header */
+            pkt[RTP_HEADER_SIZE] = fu_indicator;
+            pkt[RTP_HEADER_SIZE + 1] = (first ? 0x80 : 0x00) |
+                                        (last_frag ? 0x40 : 0x00) | nal_type;
+
+            memcpy(pkt + RTP_HEADER_SIZE + 2, payload, chunk);
+            sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + 2 + chunk, 0,
+                   (struct sockaddr *)&s_cam.rtp_dest, sizeof(s_cam.rtp_dest));
+
+            s_cam.rtp_seq++;
+            payload += chunk;
+            remaining -= chunk;
+            first = false;
+        }
+    }
+}
+
+/*
+ * Send a complete H.264 bitstream (may contain multiple NAL units).
+ * Scans for 00 00 00 01 or 00 00 01 start codes and sends each NAL.
+ */
+static void rtp_send_h264_frame(const uint8_t *data, size_t len)
+{
+    if (len < 4) return;
+
+    /* Advance timestamp by one frame interval */
+    s_cam.rtp_timestamp += RTP_CLOCK_RATE / STREAM_TARGET_FPS;
+
+    /* Find NAL units by scanning for start codes */
+    const uint8_t *p = data;
+    const uint8_t *end = data + len;
+    const uint8_t *nal_start = NULL;
+
+    while (p < end - 3) {
+        if (p[0] == 0 && p[1] == 0 && p[2] == 1) {
+            if (nal_start) {
+                /* Send previous NAL (not last) */
+                size_t nal_len = p - nal_start;
+                /* Strip trailing 00 before start code */
+                if (nal_start + nal_len > data && *(p - 1) == 0) nal_len--;
+                rtp_send_h264_nalu(nal_start, nal_len, false);
+            }
+            nal_start = p + 3;
+            p += 3;
+        } else if (p[0] == 0 && p[1] == 0 && p[2] == 0 && p + 3 < end && p[3] == 1) {
+            if (nal_start) {
+                size_t nal_len = p - nal_start;
+                rtp_send_h264_nalu(nal_start, nal_len, false);
+            }
+            nal_start = p + 4;
+            p += 4;
+        } else {
+            p++;
+        }
+    }
+
+    /* Send last NAL with marker */
+    if (nal_start && nal_start < end) {
+        rtp_send_h264_nalu(nal_start, end - nal_start, true);
+    }
+}
+
 /* ========== Initialization ========== */
 
 esp_err_t camera_h264_init(void)
@@ -355,8 +492,7 @@ esp_err_t camera_h264_init(void)
     s_cam.frame_ready = xSemaphoreCreateBinary();
     s_cam.jpeg_mutex = xSemaphoreCreateMutex();
     s_cam.frame_captured = xSemaphoreCreateBinary();
-    s_cam.h264_frame_ready = xSemaphoreCreateBinary();
-    s_cam.h264_mutex = xSemaphoreCreateMutex();
+    s_cam.rtp_sock = -1;
 
     /* Allocate buffers */
     s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;  /* RGB565 */
@@ -386,28 +522,28 @@ esp_err_t camera_h264_init(void)
             ESP_LOGE(TAG, "Failed to allocate JPEG buffer %d", i);
             return ESP_ERR_NO_MEM;
         }
+    }
 
-        /* H.264 output buffers: 64-byte aligned for HW encoder DMA */
-        s_cam.h264_buf[i] = heap_caps_aligned_calloc(64, 1, H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
-        if (!s_cam.h264_buf[i]) {
-            ESP_LOGE(TAG, "Failed to allocate H.264 buffer %d", i);
-            return ESP_ERR_NO_MEM;
-        }
+    /* H.264 output buffer: 64-byte aligned for HW encoder DMA */
+    s_cam.h264_buf = heap_caps_aligned_calloc(64, 1, H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    if (!s_cam.h264_buf) {
+        ESP_LOGE(TAG, "Failed to allocate H.264 buffer");
+        return ESP_ERR_NO_MEM;
     }
 
     /* O_UYY_E_VYY conversion buffer: 1.5 bytes/pixel */
     size_t yuv_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
     yuv_buf_size = (yuv_buf_size + 63) & ~63;  /* Cache line align */
-    s_cam.uyvy_buf = heap_caps_aligned_calloc(64, 1, yuv_buf_size, MALLOC_CAP_SPIRAM);
-    if (!s_cam.uyvy_buf) {
+    s_cam.yuv_buf = heap_caps_aligned_calloc(64, 1, yuv_buf_size, MALLOC_CAP_SPIRAM);
+    if (!s_cam.yuv_buf) {
         ESP_LOGE(TAG, "Failed to allocate YUV conversion buffer");
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Buffers allocated: %d x (raw=%uKB + jpeg=%uKB + h264=%uKB) + yuv=%uKB",
+    ESP_LOGI(TAG, "Buffers allocated: %d x (raw=%uKB + jpeg=%uKB) + h264=%uKB + yuv=%uKB",
              NUM_BUFS, (unsigned)(s_cam.raw_buf_size/1024),
-             (unsigned)(JPEG_BUF_SIZE/1024), (unsigned)(H264_BUF_SIZE/1024),
-             (unsigned)(yuv_buf_size/1024));
+             (unsigned)(JPEG_BUF_SIZE/1024),
+             (unsigned)(H264_BUF_SIZE/1024), (unsigned)(yuv_buf_size/1024));
 
 #if HAS_CAMERA_PIPELINE
     /* LDO for MIPI PHY */
@@ -531,6 +667,30 @@ esp_err_t camera_h264_init(void)
     ESP_LOGW(TAG, "Add espressif/esp_h264 to idf_component.yml");
 #endif
 
+    /* UDP RTP socket for H.264 streaming */
+    s_cam.rtp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_cam.rtp_sock >= 0) {
+        /* Send to broadcast on RTP_PORT — any GCS on the network receives it */
+        memset(&s_cam.rtp_dest, 0, sizeof(s_cam.rtp_dest));
+        s_cam.rtp_dest.sin_family = AF_INET;
+        s_cam.rtp_dest.sin_port = htons(RTP_PORT);
+        s_cam.rtp_dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+
+        /* Enable broadcast */
+        int broadcast = 1;
+        setsockopt(s_cam.rtp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
+        /* Non-blocking so encode loop never stalls */
+        int flags = fcntl(s_cam.rtp_sock, F_GETFL, 0);
+        fcntl(s_cam.rtp_sock, F_SETFL, flags | O_NONBLOCK);
+
+        s_cam.rtp_seq = 0;
+        s_cam.rtp_timestamp = 0;
+        ESP_LOGI(TAG, "UDP RTP socket ready (broadcast port %d)", RTP_PORT);
+    } else {
+        ESP_LOGW(TAG, "Failed to create RTP socket");
+    }
+
     /* Start capture task */
     xTaskCreatePinnedToCore(camera_capture_task, "cam_task", 8192, NULL, 5,
                             &s_cam.cam_task_handle, 1);
@@ -549,21 +709,30 @@ static void camera_capture_task(void *arg)
     ESP_LOGI(TAG, "Capture task started");
 
 #if HAS_CAMERA_PIPELINE
-    uint32_t skip_count = 0;
-    uint32_t h264_frame_num = 0;
+    int64_t last_encode_us = 0;
+    const int64_t frame_interval_us = 1000000 / STREAM_TARGET_FPS;
+    int64_t last_log_us = 0;
+
+    /* Accumulated timing stats (reset every log interval) */
+    uint32_t stat_frames = 0;
+    int64_t stat_wait_us = 0, stat_jpeg_us = 0, stat_cvt_us = 0, stat_h264_us = 0;
+    size_t stat_jpg_bytes = 0, stat_h264_bytes = 0;
 
     while (1) {
+        int64_t t0 = esp_timer_get_time();
+
         if (xSemaphoreTake(s_cam.frame_captured, pdMS_TO_TICKS(2000)) != pdTRUE) {
             ESP_LOGW(TAG, "Frame capture timeout - check camera ribbon cable");
             continue;
         }
 
-        /* Skip frames to limit encode rate for HaLow bandwidth */
-        skip_count++;
-        if (skip_count < STREAM_FRAME_SKIP) {
+        int64_t t1 = esp_timer_get_time();
+
+        /* Time-based frame skip (consistent interval regardless of encode time) */
+        if ((t1 - last_encode_us) < frame_interval_us) {
             continue;
         }
-        skip_count = 0;
+        last_encode_us = t1;
 
         int buf_idx = s_cam.captured_buf_idx;
         uint8_t *frame_data = s_cam.raw_buf[buf_idx];
@@ -572,7 +741,9 @@ static void camera_capture_task(void *arg)
         esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        /* === JPEG encode (for MJPEG /stream) === */
+        /* === JPEG encode (for MJPEG HTTP stream) === */
+        int64_t t2 = t1;
+        size_t jpg_size_out = 0;
 #if HAS_HW_JPEG
         {
             int wr_idx = s_cam.jpeg_write_idx;
@@ -597,40 +768,42 @@ static void camera_capture_task(void *arg)
                     xSemaphoreGive(s_cam.jpeg_mutex);
                 }
                 xSemaphoreGive(s_cam.frame_ready);
+                jpg_size_out = jpg_size;
             }
         }
+        t2 = esp_timer_get_time();
 #endif
 
-        /* === H.264 encode (for /h264 stream) === */
+        /* === H.264 encode → send via UDP RTP === */
+        int64_t t3 = t2, t4 = t2;
+        size_t h264_size_out = 0;
 #if HAS_HW_H264
         if (s_cam.h264_handle) {
-            /* Convert RGB565 → O_UYY_E_VYY (HW encoder native format) */
-            rgb565_to_ouyy_evyy(frame_data, s_cam.uyvy_buf, CAM_WIDTH, CAM_HEIGHT);
+            /* RGB565 → O_UYY_E_VYY conversion */
+            rgb565_to_ouyy_evyy(frame_data, s_cam.yuv_buf, CAM_WIDTH, CAM_HEIGHT);
+            t3 = esp_timer_get_time();
 
-            int wr_idx = s_cam.h264_write_idx;
+            /* HW H.264 encode */
             esp_h264_enc_in_frame_t in_frame = {
-                .raw_data = { .buffer = s_cam.uyvy_buf },
+                .raw_data = { .buffer = s_cam.yuv_buf },
             };
             in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
 
             esp_h264_enc_out_frame_t out_frame = {
                 .raw_data = {
-                    .buffer = s_cam.h264_buf[wr_idx],
+                    .buffer = s_cam.h264_buf,
                     .len = H264_BUF_SIZE,
                 },
             };
 
             esp_h264_err_t h264_ret = esp_h264_enc_process(s_cam.h264_handle,
                                                             &in_frame, &out_frame);
+            t4 = esp_timer_get_time();
+
             if (h264_ret == ESP_H264_ERR_OK && out_frame.length > 0) {
-                if (xSemaphoreTake(s_cam.h264_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    s_cam.h264_size[wr_idx] = out_frame.length;
-                    s_cam.h264_write_idx = (wr_idx + 1) % NUM_BUFS;
-                    s_cam.h264_read_idx = wr_idx;
-                    xSemaphoreGive(s_cam.h264_mutex);
-                }
-                xSemaphoreGive(s_cam.h264_frame_ready);
-                h264_frame_num++;
+                h264_size_out = out_frame.length;
+                /* Send immediately via UDP RTP (non-blocking) */
+                rtp_send_h264_frame(s_cam.h264_buf, out_frame.length);
             }
         }
 #endif
@@ -643,6 +816,34 @@ static void camera_capture_task(void *arg)
             s_cam.fps = (float)s_cam.frame_count * 1000000.0f / (float)elapsed;
             s_cam.frame_count = 0;
             s_cam.stats_start_time = now;
+        }
+
+        /* Timing debug log (every 5 seconds) */
+        stat_frames++;
+        stat_wait_us += (t1 - t0);
+        stat_jpeg_us += (t2 - t1);
+        stat_cvt_us += (t3 - t2);
+        stat_h264_us += (t4 - t3);
+        stat_jpg_bytes += jpg_size_out;
+        stat_h264_bytes += h264_size_out;
+
+        if ((now - last_log_us) > 5000000) {
+            if (stat_frames > 0) {
+                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms jpeg=%ldms cvt=%ldms h264=%ldms "
+                         "total=%ldms | jpg=%luKB h264=%luKB",
+                         (long)stat_frames,
+                         (long)(stat_wait_us / stat_frames / 1000),
+                         (long)(stat_jpeg_us / stat_frames / 1000),
+                         (long)(stat_cvt_us / stat_frames / 1000),
+                         (long)(stat_h264_us / stat_frames / 1000),
+                         (long)((stat_wait_us + stat_jpeg_us + stat_cvt_us + stat_h264_us) / stat_frames / 1000),
+                         (unsigned long)(stat_jpg_bytes / 1024),
+                         (unsigned long)(stat_h264_bytes / 1024));
+            }
+            stat_frames = 0;
+            stat_wait_us = stat_jpeg_us = stat_cvt_us = stat_h264_us = 0;
+            stat_jpg_bytes = stat_h264_bytes = 0;
+            last_log_us = now;
         }
     }
 
@@ -704,48 +905,16 @@ static esp_err_t stream_handler(httpd_req_t *req)
     return res;
 }
 
-static esp_err_t h264_stream_handler(httpd_req_t *req)
-{
-    esp_err_t res;
-
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Content-Type", "video/h264");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-
-    ESP_LOGI(TAG, "H.264 stream client connected");
-
-    while (true) {
-        if (xSemaphoreTake(s_cam.h264_frame_ready, pdMS_TO_TICKS(5000)) != pdTRUE) {
-            continue;
-        }
-
-        if (xSemaphoreTake(s_cam.h264_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            int rd_idx = s_cam.h264_read_idx;
-            size_t h264_size = s_cam.h264_size[rd_idx];
-
-            if (h264_size > 0) {
-                res = httpd_resp_send_chunk(req,
-                    (const char *)s_cam.h264_buf[rd_idx], h264_size);
-            }
-            xSemaphoreGive(s_cam.h264_mutex);
-
-            if (res != ESP_OK) break;
-        }
-    }
-
-    ESP_LOGI(TAG, "H.264 stream client disconnected");
-    return ESP_OK;
-}
-
 static esp_err_t status_handler(httpd_req_t *req)
 {
-    char buf[384];
+    char buf[512];
     snprintf(buf, sizeof(buf),
         "{\"initialized\":%s,\"resolution\":\"%dx%d\",\"fps\":%.1f,"
         "\"jpeg_encoder\":\"%s\",\"h264_encoder\":\"%s\","
-        "\"transport\":\"halow\",\"pipeline\":\"csi_isp\","
-        "\"endpoints\":[\"/\",\"/h264\",\"/status\"]}",
+        "\"h264_transport\":\"udp_rtp\",\"h264_port\":%d,"
+        "\"pipeline\":\"csi_isp\","
+        "\"endpoints\":[\"/\",\"/status\"],"
+        "\"vlc\":\"rtp://@:%d\"}",
         s_cam.initialized ? "true" : "false",
         CAM_WIDTH, CAM_HEIGHT, s_cam.fps,
 #if HAS_HW_JPEG
@@ -754,11 +923,11 @@ static esp_err_t status_handler(httpd_req_t *req)
         "none",
 #endif
 #if HAS_HW_H264
-        s_cam.h264_handle ? "hw" : "failed"
+        s_cam.h264_handle ? "hw" : "failed",
 #else
-        "none"
+        "none",
 #endif
-        );
+        RTP_PORT, RTP_PORT);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -771,12 +940,6 @@ static const httpd_uri_t uri_stream = {
     .uri = "/",
     .method = HTTP_GET,
     .handler = stream_handler,
-};
-
-static const httpd_uri_t uri_h264 = {
-    .uri = "/h264",
-    .method = HTTP_GET,
-    .handler = h264_stream_handler,
 };
 
 static const httpd_uri_t uri_status = {
@@ -795,12 +958,11 @@ httpd_handle_t camera_stream_server_start(void)
 
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_register_uri_handler(server, &uri_stream);
-        httpd_register_uri_handler(server, &uri_h264);
         httpd_register_uri_handler(server, &uri_status);
-        ESP_LOGI(TAG, "Camera HTTP server started");
-        ESP_LOGI(TAG, "  MJPEG stream: http://<ip>/");
-        ESP_LOGI(TAG, "  H.264 stream: http://<ip>/h264");
-        ESP_LOGI(TAG, "  Status:       http://<ip>/status");
+        ESP_LOGI(TAG, "Camera streaming started");
+        ESP_LOGI(TAG, "  MJPEG:  http://<ip>/         (browser)");
+        ESP_LOGI(TAG, "  H.264:  udp://broadcast:%d   (RTP, QGC/VLC)", RTP_PORT);
+        ESP_LOGI(TAG, "  Status: http://<ip>/status");
     } else {
         ESP_LOGE(TAG, "Failed to start HTTP server");
     }
