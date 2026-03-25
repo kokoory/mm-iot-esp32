@@ -27,7 +27,10 @@ uint8_t mavlink_get_crc_extra(uint32_t msgid)
     case MAVLINK_MSG_ID_VFR_HUD:             return 20;
     case MAVLINK_MSG_ID_COMMAND_LONG:        return 152;
     case MAVLINK_MSG_ID_COMMAND_ACK:         return 143;
+    case MAVLINK_MSG_ID_SERVO_OUTPUT_RAW:    return 222;
+    case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE: return 124;
     case MAVLINK_MSG_ID_BATTERY_STATUS:      return 154;
+    case MAVLINK_MSG_ID_NAMED_VALUE_FLOAT:   return 170;
     case MAVLINK_MSG_ID_STATUSTEXT:          return 83;
     case MAVLINK_MSG_ID_PARAM_REQUEST_READ:  return 214;
     case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:  return 159;
@@ -704,6 +707,97 @@ void mavlink_msg_param_set_decode(const mavlink_message_t *msg,
         param_id[16] = '\0';
     }
     if (param_type) *param_type = get_u8(msg->payload, 22);
+}
+
+/* ── Statustext (ID 253) ─────────────────────────────────────── *
+ * Payload layout (51 bytes):
+ *   0:    severity (uint8) - MAV_SEVERITY enum
+ *   1-50: text (char[50])
+ */
+void mavlink_msg_statustext_encode(mavlink_message_t *msg,
+                                   uint8_t severity,
+                                   const char *text)
+{
+    msg_init(msg, MAVLINK_MSG_ID_STATUSTEXT);
+    msg->len = 51;
+    memset(msg->payload, 0, 51);
+    put_u8(msg->payload, 0, severity);
+    if (text) {
+        size_t len = strlen(text);
+        if (len > 50) len = 50;
+        memcpy(&msg->payload[1], text, len);
+    }
+    mavlink_finalize(msg);
+}
+
+/* ── RC Channels Override (ID 70) - decode ───────────────────── *
+ * Payload layout (18 bytes):
+ *   0-1:   chan1_raw (uint16)
+ *   2-3:   chan2_raw (uint16)
+ *   ...
+ *   14-15: chan8_raw (uint16)
+ *   16:    target_system (uint8)
+ *   17:    target_component (uint8)
+ */
+void mavlink_msg_rc_channels_override_decode(const mavlink_message_t *msg,
+                                              uint16_t chan_out[8],
+                                              uint8_t *target_system,
+                                              uint8_t *target_component)
+{
+    for (int i = 0; i < 8; i++) {
+        chan_out[i] = get_u16(msg->payload, i * 2);
+    }
+    if (target_system) *target_system = get_u8(msg->payload, 16);
+    if (target_component) *target_component = get_u8(msg->payload, 17);
+}
+
+/* ── Servo Output Raw (ID 36) ────────────────────────────────── *
+ * Payload layout (21 bytes):
+ *   0-3:   time_usec (uint32)
+ *   4-5:   servo1_raw (uint16)
+ *   6-7:   servo2_raw (uint16)
+ *   ...
+ *   18-19: servo8_raw (uint16)
+ *   20:    port (uint8)
+ */
+void mavlink_msg_servo_output_raw_encode(mavlink_message_t *msg,
+                                         uint32_t time_usec,
+                                         uint8_t port,
+                                         uint16_t servo[8])
+{
+    msg_init(msg, MAVLINK_MSG_ID_SERVO_OUTPUT_RAW);
+    msg->len = 21;
+    memset(msg->payload, 0, 21);
+    put_u32(msg->payload, 0, time_usec);
+    for (int i = 0; i < 8; i++) {
+        put_u16(msg->payload, 4 + i * 2, servo[i]);
+    }
+    put_u8(msg->payload, 20, port);
+    mavlink_finalize(msg);
+}
+
+/* ── Named Value Float (ID 251) ──────────────────────────────── *
+ * Payload layout (18 bytes):
+ *   0-3:   time_boot_ms (uint32)
+ *   4-7:   value (float)
+ *   8-17:  name (char[10])
+ */
+void mavlink_msg_named_value_float_encode(mavlink_message_t *msg,
+                                          uint32_t time_boot_ms,
+                                          const char *name,
+                                          float value)
+{
+    msg_init(msg, MAVLINK_MSG_ID_NAMED_VALUE_FLOAT);
+    msg->len = 18;
+    memset(msg->payload, 0, 18);
+    put_u32(msg->payload, 0, time_boot_ms);
+    put_float(msg->payload, 4, value);
+    if (name) {
+        size_t len = strlen(name);
+        if (len > 10) len = 10;
+        memcpy(&msg->payload[8], name, len);
+    }
+    mavlink_finalize(msg);
 }
 
 /* ── Param Request Read (ID 20) - decode ─────────────────────── *

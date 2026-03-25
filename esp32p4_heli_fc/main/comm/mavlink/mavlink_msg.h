@@ -147,6 +147,33 @@ void mavlink_msg_param_request_read_decode(const mavlink_message_t *msg,
                                            uint8_t *target_system,
                                            uint8_t *target_component);
 
+/* ── Statustext (ID 253) ─────────────────────────────────────── */
+
+void mavlink_msg_statustext_encode(mavlink_message_t *msg,
+                                   uint8_t severity,
+                                   const char *text);
+
+/* ── RC Channels Override (ID 70) - decode ───────────────────── */
+
+void mavlink_msg_rc_channels_override_decode(const mavlink_message_t *msg,
+                                              uint16_t chan_out[8],
+                                              uint8_t *target_system,
+                                              uint8_t *target_component);
+
+/* ── Servo Output Raw (ID 36) ────────────────────────────────── */
+
+void mavlink_msg_servo_output_raw_encode(mavlink_message_t *msg,
+                                         uint32_t time_usec,
+                                         uint8_t port,
+                                         uint16_t servo[8]);
+
+/* ── Named Value Float (ID 251) ──────────────────────────────── */
+
+void mavlink_msg_named_value_float_encode(mavlink_message_t *msg,
+                                          uint32_t time_boot_ms,
+                                          const char *name,
+                                          float value);
+
 /* ── Command Long (ID 76) - decode ───────────────────────────── */
 
 void mavlink_msg_command_long_decode(const mavlink_message_t *msg,

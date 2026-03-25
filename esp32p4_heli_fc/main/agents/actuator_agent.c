@@ -28,8 +28,13 @@
 #include "../uorb/topics/actuator_controls.h"
 #include "../uorb/topics/vehicle_status.h"
 #include "../control/heli_mixer.h"
+#include "../rpc/rpc_core.h"
+#include "../rpc/rpc_messages.h"
 
 static const char *TAG = "actuator_agent";
+
+/* External: get RPC context from main */
+extern rpc_context_t *main_get_rpc_context(void);
 
 /* PWM config */
 #define SERVO_PWM_FREQ_HZ       50      /* 50 Hz = 20 ms period */
@@ -193,7 +198,9 @@ static void actuator_task(void *param)
     actuator_controls_t act = {0};
     vehicle_status_t    status = {0};
 
+    rpc_context_t *rpc_ctx = main_get_rpc_context();
     TickType_t last_wake = xTaskGetTickCount();
+    uint32_t cycle = 0;
 
     while (1) {
         uint64_t now_us = (uint64_t)esp_timer_get_time();
@@ -216,6 +223,20 @@ static void actuator_task(void *param)
             set_pwm_us(2, mix_out.servo3_us);
             set_pwm_us(3, mix_out.tail_esc_us);
             set_pwm_us(4, mix_out.main_esc_us);
+
+            /* Send servo output via RPC at 10 Hz (every 50th cycle at 500Hz) */
+            if ((cycle % 50) == 0 && rpc_ctx) {
+                rpc_telemetry_msg_t telem;
+                memset(&telem, 0, sizeof(telem));
+                telem.msg_type = RPC_MSG_SERVO_OUTPUT;
+                telem.timestamp_ms = (uint32_t)(now_us / 1000ULL);
+                telem.data.servo_output.servo_us[0] = (uint16_t)mix_out.servo1_us;
+                telem.data.servo_output.servo_us[1] = (uint16_t)mix_out.servo2_us;
+                telem.data.servo_output.servo_us[2] = (uint16_t)mix_out.servo3_us;
+                telem.data.servo_output.servo_us[3] = (uint16_t)mix_out.tail_esc_us;
+                telem.data.servo_output.servo_us[4] = (uint16_t)mix_out.main_esc_us;
+                rpc_send_telemetry(rpc_ctx, &telem);
+            }
         } else {
             /* Disarmed: safe values */
             set_pwm_us(0, SERVO_SAFE_US);
@@ -225,6 +246,7 @@ static void actuator_task(void *param)
             set_pwm_us(4, ESC_SAFE_US);
         }
 
+        cycle++;
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
     }
 }

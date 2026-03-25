@@ -42,11 +42,17 @@ static rpc_telemetry_msg_t s_latest_altitude;
 static rpc_telemetry_msg_t s_latest_battery;
 static rpc_telemetry_msg_t s_latest_status;
 static rpc_telemetry_msg_t s_latest_rc;
+static rpc_telemetry_msg_t s_latest_servo;
 
 /* Param value queue (RPC_MSG_PARAM_VALUE from Core 0) */
 #define PARAM_VALUE_QUEUE_DEPTH 16
 static rpc_telemetry_msg_t s_param_value_queue[PARAM_VALUE_QUEUE_DEPTH];
 static int s_param_value_count = 0;
+
+/* Statustext queue (RPC_MSG_STATUSTEXT from Core 0) */
+#define STATUSTEXT_QUEUE_DEPTH 8
+static rpc_telemetry_msg_t s_statustext_queue[STATUSTEXT_QUEUE_DEPTH];
+static int s_statustext_count = 0;
 
 static bool s_has_attitude  = false;
 static bool s_has_gps       = false;
@@ -54,6 +60,7 @@ static bool s_has_altitude  = false;
 static bool s_has_battery   = false;
 static bool s_has_status    = false;
 static bool s_has_rc        = false;
+static bool s_has_servo     = false;
 
 /* Timing for rate-limited sends */
 static uint32_t s_last_heartbeat_ms = 0;
@@ -61,6 +68,7 @@ static uint32_t s_last_attitude_ms  = 0;
 static uint32_t s_last_gps_ms       = 0;
 static uint32_t s_last_battery_ms   = 0;
 static uint32_t s_last_vfr_hud_ms   = 0;
+static uint32_t s_last_servo_ms     = 0;
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
@@ -131,6 +139,15 @@ static void drain_rpc_telemetry(void)
         case RPC_MSG_PARAM_VALUE:
             if (s_param_value_count < PARAM_VALUE_QUEUE_DEPTH) {
                 s_param_value_queue[s_param_value_count++] = telem;
+            }
+            break;
+        case RPC_MSG_SERVO_OUTPUT:
+            s_latest_servo = telem;
+            s_has_servo = true;
+            break;
+        case RPC_MSG_STATUSTEXT:
+            if (s_statustext_count < STATUSTEXT_QUEUE_DEPTH) {
+                s_statustext_queue[s_statustext_count++] = telem;
             }
             break;
         default:
@@ -285,6 +302,36 @@ static void send_vfr_hud(void)
     send_mavlink_msg(&msg);
 }
 
+static void send_servo_output(void)
+{
+    if (!s_has_servo || !rate_check(&s_last_servo_ms, 4)) { /* 4 Hz */
+        return;
+    }
+
+    uint16_t servo[8] = {0};
+    for (int i = 0; i < 5 && i < 8; i++) {
+        servo[i] = s_latest_servo.data.servo_output.servo_us[i];
+    }
+
+    mavlink_message_t msg;
+    mavlink_msg_servo_output_raw_encode(&msg,
+        s_latest_servo.timestamp_ms * 1000, 0, servo);
+    send_mavlink_msg(&msg);
+}
+
+static void send_statustext_messages(void)
+{
+    for (int i = 0; i < s_statustext_count; i++) {
+        const rpc_telemetry_msg_t *st = &s_statustext_queue[i];
+        mavlink_message_t msg;
+        mavlink_msg_statustext_encode(&msg,
+            st->data.statustext.severity,
+            st->data.statustext.text);
+        send_mavlink_msg(&msg);
+    }
+    s_statustext_count = 0;
+}
+
 static void send_param_values(void)
 {
     for (int i = 0; i < s_param_value_count; i++) {
@@ -308,7 +355,9 @@ static void send_telemetry(void)
     send_gps();
     send_battery();
     send_vfr_hud();
+    send_servo_output();
     send_param_values();
+    send_statustext_messages();
 }
 
 /* ── Process incoming MAVLink commands from GCS ───────────────── */
@@ -349,8 +398,37 @@ static void handle_command_long(const mavlink_message_t *msg)
 
     case MAV_CMD_DO_SET_MODE:
         rpc_cmd.msg_type = RPC_CMD_SET_MODE;
-        rpc_cmd.data.mode_cmd.mode = (uint8_t)param2; /* custom_mode in param2 */
+        rpc_cmd.data.mode_cmd.mode = (uint8_t)param2;
         ESP_LOGI(TAG, "SET_MODE command: mode=%d", rpc_cmd.data.mode_cmd.mode);
+        break;
+
+    case MAV_CMD_NAV_RETURN_TO_LAUNCH:
+        rpc_cmd.msg_type = RPC_CMD_SET_MODE;
+        rpc_cmd.data.mode_cmd.mode = 5; /* FLIGHT_MODE_RTH */
+        ESP_LOGI(TAG, "NAV_RETURN_TO_LAUNCH -> RTH mode");
+        break;
+
+    case MAV_CMD_NAV_LAND:
+        rpc_cmd.msg_type = RPC_CMD_SET_MODE;
+        rpc_cmd.data.mode_cmd.mode = 6; /* FLIGHT_MODE_LAND */
+        ESP_LOGI(TAG, "NAV_LAND -> LAND mode");
+        break;
+
+    case MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN:
+        if (param1 >= 1.0f) {
+            rpc_cmd.msg_type = RPC_CMD_REBOOT;
+            ESP_LOGW(TAG, "REBOOT command received");
+        } else {
+            result = MAV_RESULT_DENIED;
+        }
+        break;
+
+    case MAV_CMD_PREFLIGHT_CALIBRATION:
+        /* Acknowledge but note calibration is not yet implemented */
+        ESP_LOGI(TAG, "CALIBRATION command (not implemented yet)");
+        result = MAV_RESULT_ACCEPTED;
+        /* Don't send RPC for now - calibration logic TBD */
+        rpc_cmd.msg_type = 0;
         break;
 
     default:
@@ -364,8 +442,8 @@ static void handle_command_long(const mavlink_message_t *msg)
     mavlink_msg_command_ack_encode(&ack_msg, command, result);
     send_mavlink_msg(&ack_msg);
 
-    /* Forward to Core 0 if accepted */
-    if (result == MAV_RESULT_ACCEPTED) {
+    /* Forward to Core 0 if accepted and has valid msg_type */
+    if (result == MAV_RESULT_ACCEPTED && rpc_cmd.msg_type != 0) {
         if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
             ESP_LOGW(TAG, "Failed to send RPC command to Core 0");
         }
@@ -445,6 +523,37 @@ static void handle_param_set(const mavlink_message_t *msg)
     }
 }
 
+static void handle_rc_channels_override(const mavlink_message_t *msg)
+{
+    uint16_t channels[8];
+    uint8_t target_system, target_component;
+
+    mavlink_msg_rc_channels_override_decode(msg, channels,
+                                             &target_system, &target_component);
+
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    rpc_command_msg_t rpc_cmd;
+    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
+    rpc_cmd.msg_type = RPC_CMD_RC_OVERRIDE;
+    rpc_cmd.timestamp_ms = get_time_ms();
+
+    /* Convert PWM (1000-2000) to normalized (-1000 to +1000) for RPC */
+    for (int i = 0; i < 8; i++) {
+        if (channels[i] == 0 || channels[i] == UINT16_MAX) {
+            /* 0 or 0xFFFF means "release" - don't override this channel */
+            rpc_cmd.data.rc_override.channels[i] = 0;
+        } else {
+            /* Map 1000-2000 -> -1000 to +1000 */
+            rpc_cmd.data.rc_override.channels[i] = (int16_t)(channels[i] - 1500);
+        }
+    }
+
+    if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
+        ESP_LOGW(TAG, "Failed to send RC_OVERRIDE to Core 0");
+    }
+}
+
 static void process_mavlink_message(const mavlink_message_t *msg)
 {
     /* Ignore messages from ourselves */
@@ -467,6 +576,9 @@ static void process_mavlink_message(const mavlink_message_t *msg)
         break;
     case MAVLINK_MSG_ID_PARAM_SET:
         handle_param_set(msg);
+        break;
+    case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE:
+        handle_rc_channels_override(msg);
         break;
     default:
         ESP_LOGD(TAG, "Unhandled MAVLink msg ID: %lu from sys=%d comp=%d",

@@ -16,7 +16,9 @@ enum {
     RPC_MSG_BATTERY     = 0x05,
     RPC_MSG_STATUS      = 0x06,
     RPC_MSG_RC_CHANNELS = 0x07,
-    RPC_MSG_PARAM_VALUE = 0x08,
+    RPC_MSG_PARAM_VALUE   = 0x08,
+    RPC_MSG_SERVO_OUTPUT  = 0x09,
+    RPC_MSG_STATUSTEXT    = 0x0A,
 };
 
 /* Message types: Core 1 -> Core 0 (commands) */
@@ -81,6 +83,15 @@ typedef struct {
             uint16_t count;         /* total param count */
             uint16_t index;         /* param index */
         } param_value;
+
+        struct {
+            uint16_t servo_us[5];   /* servo1, servo2, servo3, tail_esc, main_esc */
+        } servo_output;
+
+        struct {
+            uint8_t severity;       /* MAV_SEVERITY */
+            char    text[50];
+        } statustext;
     } data;
 } rpc_telemetry_msg_t;
 

@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "esp_adc/adc_oneshot.h"
 #include "driver/gpio.h"
 
@@ -140,6 +141,27 @@ static void send_param_value_rpc(rpc_context_t *rpc, param_id_t id)
     msg.data.param_value.type = 9; /* MAV_PARAM_TYPE_REAL32 */
     msg.data.param_value.count = param_count();
     msg.data.param_value.index = (uint16_t)id;
+
+    rpc_send_telemetry(rpc, &msg);
+}
+
+/* MAV_SEVERITY levels */
+#define MAV_SEVERITY_EMERGENCY  0
+#define MAV_SEVERITY_ALERT      1
+#define MAV_SEVERITY_CRITICAL   2
+#define MAV_SEVERITY_ERROR      3
+#define MAV_SEVERITY_WARNING    4
+#define MAV_SEVERITY_NOTICE     5
+#define MAV_SEVERITY_INFO       6
+
+static void send_statustext_rpc(rpc_context_t *rpc, uint8_t severity, const char *text)
+{
+    rpc_telemetry_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = RPC_MSG_STATUSTEXT;
+    msg.timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    msg.data.statustext.severity = severity;
+    strncpy(msg.data.statustext.text, text, sizeof(msg.data.statustext.text) - 1);
 
     rpc_send_telemetry(rpc, &msg);
 }
@@ -280,9 +302,20 @@ static void sysmon_task(void *param)
             new_failsafe = FAILSAFE_SENSOR_FAILURE;
         }
 
-        /* Log failsafe transitions */
+        /* Log failsafe transitions and notify GCS */
         if (new_failsafe != failsafe && arm_state == ARM_STATE_ARMED) {
             ESP_LOGW(TAG, "FAILSAFE: %d -> %d", failsafe, new_failsafe);
+            if (new_failsafe == FAILSAFE_NONE) {
+                send_statustext_rpc(rpc, MAV_SEVERITY_INFO, "Failsafe cleared");
+            } else if (new_failsafe == FAILSAFE_RC_LOST) {
+                send_statustext_rpc(rpc, MAV_SEVERITY_CRITICAL, "RC signal lost");
+            } else if (new_failsafe == FAILSAFE_BATTERY_LOW) {
+                send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "Battery low");
+            } else if (new_failsafe == FAILSAFE_BATTERY_CRITICAL) {
+                send_statustext_rpc(rpc, MAV_SEVERITY_CRITICAL, "Battery critical - landing");
+            } else if (new_failsafe == FAILSAFE_SENSOR_FAILURE) {
+                send_statustext_rpc(rpc, MAV_SEVERITY_EMERGENCY, "Sensor failure - disarming");
+            }
         }
         failsafe = new_failsafe;
 
@@ -350,6 +383,7 @@ static void sysmon_task(void *param)
                         } else {
                             ESP_LOGI(TAG, "ARMED via RPC");
                             arm_state = ARM_STATE_ARMED;
+                            send_statustext_rpc(rpc, MAV_SEVERITY_INFO, "Vehicle armed");
                         }
                     }
                     break;
@@ -357,6 +391,7 @@ static void sysmon_task(void *param)
                 case RPC_CMD_DISARM:
                     ESP_LOGI(TAG, "DISARMED via RPC");
                     arm_state = ARM_STATE_DISARMED;
+                    send_statustext_rpc(rpc, MAV_SEVERITY_INFO, "Vehicle disarmed");
                     break;
 
                 case RPC_CMD_SET_MODE:
@@ -418,6 +453,18 @@ static void sysmon_task(void *param)
                 case RPC_CMD_PARAM_SAVE:
                     ESP_LOGI(TAG, "Saving params to NVS");
                     param_save_all();
+                    send_statustext_rpc(rpc, MAV_SEVERITY_INFO, "Params saved to flash");
+                    break;
+
+                case RPC_CMD_REBOOT:
+                    if (arm_state != ARM_STATE_ARMED) {
+                        send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "Rebooting...");
+                        ESP_LOGW(TAG, "REBOOT requested via RPC");
+                        vTaskDelay(pdMS_TO_TICKS(500)); /* give time for statustext to send */
+                        esp_restart();
+                    } else {
+                        ESP_LOGW(TAG, "REBOOT rejected: vehicle is armed");
+                    }
                     break;
 
                 default:
