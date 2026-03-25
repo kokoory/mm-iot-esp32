@@ -283,30 +283,59 @@ esp_err_t camera_h264_init(void)
     ESP_LOGI(TAG, "Initializing MIPI-CSI camera pipeline");
     ESP_LOGI(TAG, "Target: %dx%d, format: %s", CAM_WIDTH, CAM_HEIGHT, CAM_FORMAT);
 
-    /* Allocate JPEG output double buffers in PSRAM */
+    s_cam.frame_ready = xSemaphoreCreateBinary();
+    s_cam.jpeg_mutex = xSemaphoreCreateMutex();
+    s_cam.frame_captured = xSemaphoreCreateBinary();
+
+    /*
+     * Allocate buffers using jpeg_alloc_encoder_mem() for proper alignment.
+     * The ESP32-P4 HW JPEG encoder requires DMA-aligned buffers.
+     */
+    s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;  /* RGB565: 2 bytes/pixel */
+
+#if HAS_HW_JPEG
     for (int i = 0; i < NUM_BUFS; i++) {
+        /* Raw input buffers (RGB565 from CSI/ISP) */
+        size_t raw_alloc_size = 0;
+        jpeg_encode_memory_alloc_cfg_t raw_mem_cfg = {
+            .buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER,
+        };
+        s_cam.raw_buf[i] = (uint8_t *)jpeg_alloc_encoder_mem(
+            s_cam.raw_buf_size, &raw_mem_cfg, &raw_alloc_size);
+        if (!s_cam.raw_buf[i]) {
+            ESP_LOGE(TAG, "Failed to allocate raw frame buffer %d", i);
+            return ESP_ERR_NO_MEM;
+        }
+
+        /* JPEG output buffers */
+        size_t jpg_alloc_size = 0;
+        jpeg_encode_memory_alloc_cfg_t jpg_mem_cfg = {
+            .buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER,
+        };
+        s_cam.jpeg_buf[i] = (uint8_t *)jpeg_alloc_encoder_mem(
+            JPEG_BUF_SIZE, &jpg_mem_cfg, &jpg_alloc_size);
+        if (!s_cam.jpeg_buf[i]) {
+            ESP_LOGE(TAG, "Failed to allocate JPEG buffer %d", i);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+#else
+    /* Fallback: regular PSRAM allocation when HW JPEG not available */
+    for (int i = 0; i < NUM_BUFS; i++) {
+        s_cam.raw_buf[i] = heap_caps_aligned_calloc(64, 1, s_cam.raw_buf_size,
+                                                     MALLOC_CAP_SPIRAM);
+        if (!s_cam.raw_buf[i]) {
+            ESP_LOGE(TAG, "Failed to allocate raw frame buffer %d", i);
+            return ESP_ERR_NO_MEM;
+        }
         s_cam.jpeg_buf[i] = heap_caps_malloc(JPEG_BUF_SIZE, MALLOC_CAP_SPIRAM);
         if (!s_cam.jpeg_buf[i]) {
             ESP_LOGE(TAG, "Failed to allocate JPEG buffer %d", i);
             return ESP_ERR_NO_MEM;
         }
     }
+#endif
 
-    s_cam.frame_ready = xSemaphoreCreateBinary();
-    s_cam.jpeg_mutex = xSemaphoreCreateMutex();
-    s_cam.frame_captured = xSemaphoreCreateBinary();
-
-    /* Allocate raw frame double buffers (RGB565: 2 bytes per pixel) */
-    s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;
-    for (int i = 0; i < NUM_BUFS; i++) {
-        s_cam.raw_buf[i] = heap_caps_aligned_calloc(64, 1, s_cam.raw_buf_size,
-                                                     MALLOC_CAP_SPIRAM);
-        if (!s_cam.raw_buf[i]) {
-            ESP_LOGE(TAG, "Failed to allocate raw frame buffer %d (%u bytes)",
-                     i, (unsigned)s_cam.raw_buf_size);
-            return ESP_ERR_NO_MEM;
-        }
-    }
     ESP_LOGI(TAG, "Allocated %d raw buffers (%u bytes each) + %d JPEG buffers",
              NUM_BUFS, (unsigned)s_cam.raw_buf_size, NUM_BUFS);
 
