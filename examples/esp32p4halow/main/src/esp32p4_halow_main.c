@@ -21,8 +21,7 @@
  *                   Camera
  *
  * Endpoints:
- *   http://<ip>/        - MJPEG camera stream (fallback)
- *   http://<ip>/h264    - H.264 camera stream
+ *   http://<ip>/        - MJPEG camera stream (HW JPEG encoded)
  *   http://<ip>/status  - JSON system status
  *   UDP 14550           - MAVLink telemetry (GCS port)
  *   UDP 14555           - MAVLink telemetry (local listen)
@@ -111,8 +110,8 @@ void app_main(void)
                  MAVLINK_UART_NUM, MAVLINK_GCS_PORT);
     }
 
-    /* === Phase 3: Camera + H.264 === */
-    ESP_LOGI(TAG, "Phase 3: Initializing MIPI-CSI camera + H.264...");
+    /* === Phase 3: Camera + JPEG === */
+    ESP_LOGI(TAG, "Phase 3: Initializing MIPI-CSI camera + JPEG...");
     err = camera_h264_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(err));

@@ -14,6 +14,12 @@ CONFIG_MM_SPI_CS=4
 CONFIG_MM_SPI_IRQ=21
 CONFIG_MM_BCF_FILE="bcf_mf08651_us.mbin"
 
-# MIPI-CSI camera (OV5647): 15-pin FFC ribbon cable (includes I2C)
+# MIPI-CSI camera (OV5647 / RPi Camera v1)
+# CSI uses dedicated MIPI differential pairs (not GPIO)
+# SCCB (I2C) for sensor control: SCL=GPIO8, SDA=GPIO7
+# LDO channel 3 at 2500mV powers the MIPI PHY
+CONFIG_CAMERA_OV5647=y
+CONFIG_CAMERA_OV5647_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+
 # UART for MAVLink: TX=GPIO26, RX=GPIO27
 # Free GPIOs: 22, 33, 46, 47, 48, 49, 50

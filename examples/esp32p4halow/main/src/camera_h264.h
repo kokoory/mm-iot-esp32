@@ -1,11 +1,9 @@
 /*
- * MIPI-CSI Camera + H.264 Encoder for ESP32-P4
+ * MIPI-CSI Camera + HW JPEG Encoder for ESP32-P4
  *
- * Uses the ESP32-P4 hardware H.264 encoder to compress MIPI-CSI camera
- * frames and stream them over HTTP via Wi-Fi HaLow.
+ * Pipeline: OV5647 → MIPI-CSI → ISP (RAW8→RGB565) → HW JPEG → HTTP Stream
  *
- * Reference hardware: ESP32-P4 with MIPI-CSI camera
- * (e.g., OV5647 / Raspberry Pi Camera v1, or similar 2-lane MIPI camera)
+ * Reference hardware: Waveshare ESP32-P4-WIFI6 + OV5647 (RPi Camera v1)
  */
 
 #pragma once
@@ -18,22 +16,20 @@ extern "C" {
 #endif
 
 /**
- * Initialize the MIPI-CSI camera and H.264 encoder.
+ * Initialize the MIPI-CSI camera and HW JPEG encoder pipeline.
  *
- * Configures the ISP pipeline: MIPI-CSI → ISP → H.264 encoder.
- * The H.264 output is stored in a ring buffer for streaming.
+ * Configures: LDO → SCCB/I2C → OV5647 sensor → CSI → ISP → JPEG encoder.
  *
  * @return ESP_OK on success, error code otherwise.
  */
 esp_err_t camera_h264_init(void);
 
 /**
- * Start the HTTP server for H.264 video streaming.
+ * Start the HTTP server for MJPEG video streaming.
  *
  * Endpoints:
- *   GET /         - MJPEG fallback stream (ISP JPEG output)
- *   GET /h264     - Raw H.264 NAL unit stream
- *   GET /status   - JSON status (fps, bitrate, resolution)
+ *   GET /         - MJPEG stream (HW JPEG encoded frames)
+ *   GET /status   - JSON status (fps, resolution, pipeline info)
  *
  * @return HTTP server handle, or NULL on failure.
  */

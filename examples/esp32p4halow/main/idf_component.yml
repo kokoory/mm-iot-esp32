@@ -10,3 +10,4 @@ dependencies:
     path: $MMIOT_ROOT/framework/src/mmipal
   mmregdb:
     path: $MMIOT_ROOT/framework/src/mmregdb
+  espressif/esp_cam_sensor: "^0.5.1"
