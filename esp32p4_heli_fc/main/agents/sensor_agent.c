@@ -36,6 +36,7 @@
 #include "../drivers/bmp390.h"
 #include "../drivers/lis3mdl.h"
 #include "../drivers/gps_nmea.h"
+#include "../drivers/sbus.h"
 #include "../estimator/ahrs.h"
 #include "../estimator/altitude_estimator.h"
 #include "../common/param.h"
@@ -171,6 +172,14 @@ static void sensor_task(void *param)
         ESP_LOGE(TAG, "GPS init FAILED");
     }
 
+    /* SBUS RC receiver init */
+    bool sbus_ok = (sbus_init() == 0);
+    if (sbus_ok) {
+        ESP_LOGI(TAG, "SBUS receiver initialized");
+    } else {
+        ESP_LOGE(TAG, "SBUS init FAILED");
+    }
+
     /* ---- Initialize estimators ---- */
     ahrs_init(&s_ahrs, param_get(PARAM_AHRS_BETA));
     alt_estimator_init(&s_alt_est);
@@ -184,9 +193,7 @@ static void sensor_task(void *param)
     orb_advertise(ORB_ID_VEHICLE_ATTITUDE, sizeof(vehicle_attitude_t));
     orb_advertise(ORB_ID_VEHICLE_LOCAL_POSITION, sizeof(vehicle_local_position_t));
 
-    /* RC_CHANNELS: advertise topic. Currently populated only via RPC RC override
-     * from GCS. A hardware RC receiver driver (SBUS/PPM) should publish here
-     * once integrated. */
+    /* RC_CHANNELS: populated by SBUS receiver or RPC RC override from GCS */
     orb_advertise(ORB_ID_RC_CHANNELS, sizeof(rc_channels_t));
 
     /* ---- Main loop at 1 kHz ---- */
@@ -355,6 +362,23 @@ imu_done:
             if (gps_get_data(&s_gps, &gps_data) == 0) {
                 gps_data.timestamp_us = now_us;
                 orb_publish(ORB_ID_SENSOR_GPS, &gps_data);
+            }
+        }
+
+        /* ---- SBUS RC: poll every 10th cycle (100 Hz) ---- */
+        if (sbus_ok && (cycle % 10) == 3) {
+            sbus_data_t sbus;
+            if (sbus_read(&sbus) == 0 && !sbus.failsafe) {
+                rc_channels_t rc_msg;
+                memset(&rc_msg, 0, sizeof(rc_msg));
+                rc_msg.timestamp_us = now_us;
+                rc_msg.channel_count = 8;
+                rc_msg.signal_lost = sbus.frame_lost;
+                /* Map first 8 SBUS channels to normalized -1..+1 */
+                for (int i = 0; i < 8; i++) {
+                    rc_msg.channels[i] = sbus_channel_to_float(sbus.channels[i]);
+                }
+                orb_publish(ORB_ID_RC_CHANNELS, &rc_msg);
             }
         }
 
