@@ -389,8 +389,8 @@ esp_err_t camera_h264_init(void)
             return ESP_ERR_NO_MEM;
         }
 
-        /* H.264 output buffers */
-        s_cam.h264_buf[i] = heap_caps_malloc(H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
+        /* H.264 output buffers: 64-byte aligned for HW encoder DMA */
+        s_cam.h264_buf[i] = heap_caps_aligned_calloc(64, 1, H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
         if (!s_cam.h264_buf[i]) {
             ESP_LOGE(TAG, "Failed to allocate H.264 buffer %d", i);
             return ESP_ERR_NO_MEM;
