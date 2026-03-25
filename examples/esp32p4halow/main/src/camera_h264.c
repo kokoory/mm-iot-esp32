@@ -297,26 +297,26 @@ static inline uint8_t clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 static void rgb565_to_ouyy_evyy(const uint8_t *rgb565, uint8_t *dst, int width, int height)
 {
     const uint16_t *src = (const uint16_t *)rgb565;
+    int row_out_stride = (width / 2) * 3;
 
     for (int y = 0; y < height; y++) {
         const uint16_t *row = src + y * width;
-        /* Each row: 3 bytes per 2 pixels */
-        uint8_t *out = dst + y * (width / 2) * 3;
+        uint8_t *out = dst + y * row_out_stride;
         bool odd_row = (y & 1);
 
         for (int x = 0; x < width; x += 2) {
             uint16_t p0 = row[x];
             uint16_t p1 = row[x + 1];
 
-            /* RGB565 → 8-bit RGB */
-            int r0 = ((p0 >> 11) & 0x1F) * 255 / 31;
-            int g0 = ((p0 >> 5) & 0x3F) * 255 / 63;
-            int b0 = (p0 & 0x1F) * 255 / 31;
-            int r1 = ((p1 >> 11) & 0x1F) * 255 / 31;
-            int g1 = ((p1 >> 5) & 0x3F) * 255 / 63;
-            int b1 = (p1 & 0x1F) * 255 / 31;
+            /* RGB565 → 8-bit RGB (bit-shift, no division) */
+            int r0 = (p0 >> 8) & 0xF8; r0 |= r0 >> 5;
+            int g0 = (p0 >> 3) & 0xFC; g0 |= g0 >> 6;
+            int b0 = (p0 << 3) & 0xF8; b0 |= b0 >> 5;
+            int r1 = (p1 >> 8) & 0xF8; r1 |= r1 >> 5;
+            int g1 = (p1 >> 3) & 0xFC; g1 |= g1 >> 6;
+            int b1 = (p1 << 3) & 0xF8; b1 |= b1 >> 5;
 
-            /* Y for each pixel */
+            /* Y for each pixel (BT.601) */
             int y0 = (( 66 * r0 + 129 * g0 +  25 * b0 + 128) >> 8) + 16;
             int y1 = (( 66 * r1 + 129 * g1 +  25 * b1 + 128) >> 8) + 16;
 
@@ -326,11 +326,9 @@ static void rgb565_to_ouyy_evyy(const uint8_t *rgb565, uint8_t *dst, int width, 
             int ba = (b0 + b1) >> 1;
 
             if (odd_row) {
-                /* Odd row: U Y Y */
                 int u = ((-38 * ra - 74 * ga + 112 * ba + 128) >> 8) + 128;
                 *out++ = clamp8(u);
             } else {
-                /* Even row: V Y Y */
                 int v = ((112 * ra - 94 * ga - 18 * ba + 128) >> 8) + 128;
                 *out++ = clamp8(v);
             }
