@@ -29,6 +29,10 @@ uint8_t mavlink_get_crc_extra(uint32_t msgid)
     case MAVLINK_MSG_ID_COMMAND_ACK:         return 143;
     case MAVLINK_MSG_ID_BATTERY_STATUS:      return 154;
     case MAVLINK_MSG_ID_STATUSTEXT:          return 83;
+    case MAVLINK_MSG_ID_PARAM_REQUEST_READ:  return 214;
+    case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:  return 159;
+    case MAVLINK_MSG_ID_PARAM_VALUE:         return 220;
+    case MAVLINK_MSG_ID_PARAM_SET:           return 168;
     default:                                 return 0;
     }
 }
@@ -121,6 +125,11 @@ static float get_float(const uint8_t *buf, size_t offset)
     float val;
     memcpy(&val, &tmp, sizeof(val));
     return val;
+}
+
+static int16_t get_i16(const uint8_t *buf, size_t offset)
+{
+    return (int16_t)get_u16(buf, offset);
 }
 
 static uint8_t get_u8(const uint8_t *buf, size_t offset)
@@ -640,4 +649,81 @@ void mavlink_msg_command_ack_encode(mavlink_message_t *msg,
     put_u16(msg->payload, 0, command);
     put_u8(msg->payload, 2, result);
     mavlink_finalize(msg);
+}
+
+/* ── Param Value (ID 22) ─────────────────────────────────────── *
+ * Payload layout (25 bytes):
+ *   0-3:   param_value (float)
+ *   4-5:   param_count (uint16)
+ *   6-7:   param_index (uint16)
+ *   8-23:  param_id (char[16])
+ *   24:    param_type (uint8) - MAV_PARAM_TYPE_REAL32 = 9
+ */
+void mavlink_msg_param_value_encode(mavlink_message_t *msg,
+                                    const char *param_id,
+                                    float param_value,
+                                    uint8_t param_type,
+                                    uint16_t param_count,
+                                    uint16_t param_index)
+{
+    msg_init(msg, MAVLINK_MSG_ID_PARAM_VALUE);
+    msg->len = 25;
+    memset(msg->payload, 0, 25);
+    put_float(msg->payload, 0, param_value);
+    put_u16(msg->payload, 4, param_count);
+    put_u16(msg->payload, 6, param_index);
+    if (param_id) {
+        size_t len = strlen(param_id);
+        if (len > 16) len = 16;
+        memcpy(&msg->payload[8], param_id, len);
+    }
+    put_u8(msg->payload, 24, param_type);
+    mavlink_finalize(msg);
+}
+
+/* ── Param Set (ID 23) - decode ──────────────────────────────── *
+ * Payload layout (23 bytes):
+ *   0-3:   param_value (float)
+ *   4:     target_system (uint8)
+ *   5:     target_component (uint8)
+ *   6-21:  param_id (char[16])
+ *   22:    param_type (uint8)
+ */
+void mavlink_msg_param_set_decode(const mavlink_message_t *msg,
+                                  char *param_id,
+                                  float *param_value,
+                                  uint8_t *param_type,
+                                  uint8_t *target_system,
+                                  uint8_t *target_component)
+{
+    if (param_value) *param_value = get_float(msg->payload, 0);
+    if (target_system) *target_system = get_u8(msg->payload, 4);
+    if (target_component) *target_component = get_u8(msg->payload, 5);
+    if (param_id) {
+        memcpy(param_id, &msg->payload[6], 16);
+        param_id[16] = '\0';
+    }
+    if (param_type) *param_type = get_u8(msg->payload, 22);
+}
+
+/* ── Param Request Read (ID 20) - decode ─────────────────────── *
+ * Payload layout (20 bytes):
+ *   0-1:   param_index (int16)
+ *   2:     target_system (uint8)
+ *   3:     target_component (uint8)
+ *   4-19:  param_id (char[16])
+ */
+void mavlink_msg_param_request_read_decode(const mavlink_message_t *msg,
+                                           char *param_id,
+                                           int16_t *param_index,
+                                           uint8_t *target_system,
+                                           uint8_t *target_component)
+{
+    if (param_index) *param_index = get_i16(msg->payload, 0);
+    if (target_system) *target_system = get_u8(msg->payload, 2);
+    if (target_component) *target_component = get_u8(msg->payload, 3);
+    if (param_id) {
+        memcpy(param_id, &msg->payload[4], 16);
+        param_id[16] = '\0';
+    }
 }

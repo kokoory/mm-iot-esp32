@@ -10,6 +10,7 @@
 
 #include "heli_mixer.h"
 #include "../common/math_utils.h"
+#include "../common/param.h"
 #include <math.h>
 
 /* Servo angles for 120-degree CCPM (degrees) */
@@ -40,16 +41,16 @@ static float interpolate_curve(const float curve[5], float input)
 
 void heli_mixer_init(heli_mixer_config_t *config)
 {
-    config->ccpm_angle_offset = 0.0f;
-    config->collective_range  = 1.0f;
-    config->cyclic_range      = 1.0f;
-    config->servo_center_us   = 1500.0f;
-    config->servo_range_us    = 500.0f;
-    config->esc_min_us        = 1000.0f;
-    config->esc_max_us        = 2000.0f;
-    config->tail_esc_idle_us  = 1100.0f;
-    config->main_esc_idle_us  = 1100.0f;
-    config->tail_coll_ff      = 0.3f;   /* feedforward: 30% of collective -> tail */
+    config->ccpm_angle_offset = param_get(PARAM_CCPM_ANGLE_OFFSET);
+    config->collective_range  = param_get(PARAM_COLLECTIVE_RANGE);
+    config->cyclic_range      = param_get(PARAM_CYCLIC_RANGE);
+    config->servo_center_us   = param_get(PARAM_SERVO_CENTER_US);
+    config->servo_range_us    = param_get(PARAM_SERVO_RANGE_US);
+    config->esc_min_us        = param_get(PARAM_ESC_MIN_US);
+    config->esc_max_us        = param_get(PARAM_ESC_MAX_US);
+    config->tail_esc_idle_us  = param_get(PARAM_ESC_MIN_US) + 100.0f;
+    config->main_esc_idle_us  = param_get(PARAM_ESC_MIN_US) + 100.0f;
+    config->tail_coll_ff      = param_get(PARAM_TAIL_COLL_FF);
 
     /* Normal mode throttle curve */
     config->throttle_curve[0] = 0.0f;

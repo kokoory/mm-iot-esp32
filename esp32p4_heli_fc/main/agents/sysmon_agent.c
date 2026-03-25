@@ -36,20 +36,18 @@
 #include "../rpc/rpc_core.h"
 #include "../rpc/rpc_messages.h"
 #include "../rpc/rpc_telemetry.h"
+#include "../common/param.h"
 #include "../uorb/topics/vehicle_attitude.h"
 #include "../uorb/topics/vehicle_local_position.h"
 
 static const char *TAG = "sysmon_agent";
 
 /* Battery config */
-#define BATT_LOW_VOLTAGE        10.5f   /* 3S LiPo low: 3.5V/cell */
-#define BATT_CRITICAL_VOLTAGE   9.6f    /* 3S LiPo critical: 3.2V/cell */
 #define BATT_VOLTAGE_FILTER_K   0.05f   /* low-pass filter constant */
 #define BATT_ADC_VREF           3.3f    /* ADC reference voltage */
 #define BATT_ADC_BITS           4095.0f /* 12-bit ADC */
 
-/* Sensor timeout in microseconds */
-#define SENSOR_TIMEOUT_US       500000  /* 500 ms */
+/* RC timeout in microseconds (fixed, not a tunable param) */
 #define RC_TIMEOUT_US           1000000 /* 1 second */
 
 /* LED timing */
@@ -104,7 +102,7 @@ static float read_battery_voltage(void)
     }
     /* Convert ADC raw to voltage, then apply divider ratio */
     float adc_voltage = ((float)raw / BATT_ADC_BITS) * BATT_ADC_VREF;
-    return adc_voltage * BATT_VOLTAGE_DIVIDER_RATIO;
+    return adc_voltage * param_get(PARAM_BATT_VDIV_RATIO);
 }
 
 static void init_led(void)
@@ -123,6 +121,27 @@ static void init_led(void)
 static void set_led(bool on)
 {
     gpio_set_level(PIN_STATUS_LED, on ? 1 : 0);
+}
+
+/* ── Param helpers ────────────────────────────────────────────── */
+
+static void send_param_value_rpc(rpc_context_t *rpc, param_id_t id)
+{
+    const param_meta_t *meta = param_get_meta(id);
+    if (meta == NULL) return;
+
+    rpc_telemetry_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = RPC_MSG_PARAM_VALUE;
+    msg.timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    strncpy(msg.data.param_value.name, meta->name, 16);
+    msg.data.param_value.name[16] = '\0';
+    msg.data.param_value.value = param_get(id);
+    msg.data.param_value.type = 9; /* MAV_PARAM_TYPE_REAL32 */
+    msg.data.param_value.count = param_count();
+    msg.data.param_value.index = (uint16_t)id;
+
+    rpc_send_telemetry(rpc, &msg);
 }
 
 /* ------------------------------------------------------------------ */
@@ -206,8 +225,8 @@ static void sysmon_task(void *param)
             batt_msg.voltage_per_cell = batt_filtered / (float)batt_msg.cell_count;
         }
 
-        batt_msg.warning = (batt_filtered < BATT_LOW_VOLTAGE) && (batt_filtered > 1.0f);
-        batt_msg.critical = (batt_filtered < BATT_CRITICAL_VOLTAGE) && (batt_filtered > 1.0f);
+        batt_msg.warning = (batt_filtered < param_get(PARAM_BATT_LOW_V)) && (batt_filtered > 1.0f);
+        batt_msg.critical = (batt_filtered < param_get(PARAM_BATT_CRIT_V)) && (batt_filtered > 1.0f);
 
         orb_publish(ORB_ID_BATTERY_STATUS, &batt_msg);
 
@@ -238,10 +257,10 @@ static void sysmon_task(void *param)
             }
         }
 
-        bool imu_ok  = (last_imu_ts > 0)  && ((now_us - last_imu_ts) < SENSOR_TIMEOUT_US);
-        bool baro_ok = (last_baro_ts > 0) && ((now_us - last_baro_ts) < SENSOR_TIMEOUT_US);
-        bool mag_ok  = (last_mag_ts > 0)  && ((now_us - last_mag_ts) < SENSOR_TIMEOUT_US);
-        bool gps_ok  = (last_gps_ts > 0)  && ((now_us - last_gps_ts) < SENSOR_TIMEOUT_US);
+        bool imu_ok  = (last_imu_ts > 0)  && ((now_us - last_imu_ts) < (uint64_t)(param_get(PARAM_SENSOR_TIMEOUT_MS) * 1000.0f));
+        bool baro_ok = (last_baro_ts > 0) && ((now_us - last_baro_ts) < (uint64_t)(param_get(PARAM_SENSOR_TIMEOUT_MS) * 1000.0f));
+        bool mag_ok  = (last_mag_ts > 0)  && ((now_us - last_mag_ts) < (uint64_t)(param_get(PARAM_SENSOR_TIMEOUT_MS) * 1000.0f));
+        bool gps_ok  = (last_gps_ts > 0)  && ((now_us - last_gps_ts) < (uint64_t)(param_get(PARAM_SENSOR_TIMEOUT_MS) * 1000.0f));
         bool rc_ok   = (last_rc_ts > 0)   && ((now_us - last_rc_ts) < RC_TIMEOUT_US);
 
         /* ---- 3. Determine failsafe state (highest severity wins) ---- */
@@ -318,6 +337,47 @@ static void sysmon_task(void *param)
                     orb_publish(ORB_ID_RC_CHANNELS, &rc_msg);
                     break;
                 }
+
+                case RPC_CMD_PARAM_REQUEST_READ: {
+                    param_id_t pid;
+                    if (cmd.data.param_request.index >= 0 &&
+                        cmd.data.param_request.index < (int16_t)param_count()) {
+                        pid = (param_id_t)cmd.data.param_request.index;
+                    } else {
+                        pid = param_find(cmd.data.param_request.name);
+                    }
+                    if (pid < PARAM_COUNT) {
+                        send_param_value_rpc(rpc, pid);
+                    } else {
+                        ESP_LOGW(TAG, "PARAM_REQUEST_READ: param not found");
+                    }
+                    break;
+                }
+
+                case RPC_CMD_PARAM_REQUEST_LIST: {
+                    ESP_LOGI(TAG, "Sending all %d params", param_count());
+                    for (int i = 0; i < param_count(); i++) {
+                        send_param_value_rpc(rpc, (param_id_t)i);
+                    }
+                    break;
+                }
+
+                case RPC_CMD_PARAM_SET: {
+                    param_id_t pid = param_find(cmd.data.param_set.name);
+                    if (pid < PARAM_COUNT) {
+                        param_set(pid, cmd.data.param_set.value);
+                        send_param_value_rpc(rpc, pid);
+                    } else {
+                        ESP_LOGW(TAG, "PARAM_SET: param '%s' not found",
+                                 cmd.data.param_set.name);
+                    }
+                    break;
+                }
+
+                case RPC_CMD_PARAM_SAVE:
+                    ESP_LOGI(TAG, "Saving params to NVS");
+                    param_save_all();
+                    break;
 
                 default:
                     break;

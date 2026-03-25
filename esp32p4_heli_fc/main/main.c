@@ -23,6 +23,7 @@
 
 #include "common/board_config.h"
 #include "common/flight_modes.h"
+#include "common/param.h"
 #include "uorb/uorb.h"
 #include "rpc/rpc_core.h"
 #include "agents/sensor_agent.h"
@@ -80,6 +81,10 @@ void app_main(void)
 {
     /* Step 1: Initialize NVS */
     init_nvs();
+
+    /* Step 1b: Initialize parameter system (loads from NVS) */
+    ESP_LOGI(TAG, "Initializing parameter system...");
+    param_init();
 
     /* Step 2: Print startup banner */
     print_banner();

@@ -7,5 +7,6 @@ idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
                  "${CMAKE_CURRENT_SOURCE_DIR}/mavlink"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/../../esp32p4_heli_fc/main"
     PRIV_REQUIRES driver morselib mm_shims mmipal lwip esp_timer esp_http_server mmregdb nvs_flash
 )

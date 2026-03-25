@@ -5,22 +5,17 @@
 
 #include "pos_control.h"
 #include "../common/math_utils.h"
-
-#define DEFAULT_ALT_KP          1.0f
-#define DEFAULT_CLIMB_RATE_KP   0.5f
-#define DEFAULT_CLIMB_RATE_KI   0.1f
-#define DEFAULT_CLIMB_RATE_KD   0.0f
-#define DEFAULT_MAX_CLIMB_RATE  2.0f    /* m/s */
+#include "../common/param.h"
 
 void pos_control_init(pos_controller_t *pc, float dt)
 {
-    pc->alt_kp = DEFAULT_ALT_KP;
-    pc->max_climb_rate = DEFAULT_MAX_CLIMB_RATE;
+    pc->alt_kp = param_get(PARAM_ALT_KP);
+    pc->max_climb_rate = param_get(PARAM_MAX_CLIMB_RATE);
 
     pid_init(&pc->climb_rate_pid,
-             DEFAULT_CLIMB_RATE_KP,
-             DEFAULT_CLIMB_RATE_KI,
-             DEFAULT_CLIMB_RATE_KD,
+             param_get(PARAM_CLIMB_RATE_KP),
+             param_get(PARAM_CLIMB_RATE_KI),
+             param_get(PARAM_CLIMB_RATE_KD),
              dt);
     pid_set_limits(&pc->climb_rate_pid, -1.0f, 1.0f);
     pid_set_integral_limit(&pc->climb_rate_pid, 0.5f);

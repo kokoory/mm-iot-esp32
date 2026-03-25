@@ -3,31 +3,28 @@
  */
 
 #include "rate_control.h"
-
-/* Default gains for helicopter */
-#define ROLL_RATE_KP   0.15f
-#define ROLL_RATE_KI   0.05f
-#define ROLL_RATE_KD   0.003f
-
-#define PITCH_RATE_KP  0.15f
-#define PITCH_RATE_KI  0.05f
-#define PITCH_RATE_KD  0.003f
-
-#define YAW_RATE_KP    0.3f
-#define YAW_RATE_KI    0.1f
-#define YAW_RATE_KD    0.0f
+#include "../common/param.h"
 
 void rate_control_init(rate_controller_t *rc, float dt)
 {
-    pid_init(&rc->roll, ROLL_RATE_KP, ROLL_RATE_KI, ROLL_RATE_KD, dt);
+    pid_init(&rc->roll,
+             param_get(PARAM_ROLL_RATE_KP),
+             param_get(PARAM_ROLL_RATE_KI),
+             param_get(PARAM_ROLL_RATE_KD), dt);
     pid_set_limits(&rc->roll, -1.0f, 1.0f);
     pid_set_integral_limit(&rc->roll, 0.3f);
 
-    pid_init(&rc->pitch, PITCH_RATE_KP, PITCH_RATE_KI, PITCH_RATE_KD, dt);
+    pid_init(&rc->pitch,
+             param_get(PARAM_PITCH_RATE_KP),
+             param_get(PARAM_PITCH_RATE_KI),
+             param_get(PARAM_PITCH_RATE_KD), dt);
     pid_set_limits(&rc->pitch, -1.0f, 1.0f);
     pid_set_integral_limit(&rc->pitch, 0.3f);
 
-    pid_init(&rc->yaw, YAW_RATE_KP, YAW_RATE_KI, YAW_RATE_KD, dt);
+    pid_init(&rc->yaw,
+             param_get(PARAM_YAW_RATE_KP),
+             param_get(PARAM_YAW_RATE_KI),
+             param_get(PARAM_YAW_RATE_KD), dt);
     pid_set_limits(&rc->yaw, -1.0f, 1.0f);
     pid_set_integral_limit(&rc->yaw, 0.5f);
 }

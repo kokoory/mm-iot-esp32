@@ -16,6 +16,7 @@ enum {
     RPC_MSG_BATTERY     = 0x05,
     RPC_MSG_STATUS      = 0x06,
     RPC_MSG_RC_CHANNELS = 0x07,
+    RPC_MSG_PARAM_VALUE = 0x08,
 };
 
 /* Message types: Core 1 -> Core 0 (commands) */
@@ -24,8 +25,11 @@ enum {
     RPC_CMD_DISARM      = 0x81,
     RPC_CMD_SET_MODE    = 0x82,
     RPC_CMD_RC_OVERRIDE = 0x83,
-    RPC_CMD_PARAM_SET   = 0x84,
-    RPC_CMD_REBOOT      = 0x85,
+    RPC_CMD_PARAM_SET         = 0x84,
+    RPC_CMD_REBOOT            = 0x85,
+    RPC_CMD_PARAM_REQUEST_READ = 0x86,
+    RPC_CMD_PARAM_REQUEST_LIST = 0x87,
+    RPC_CMD_PARAM_SAVE        = 0x88,
 };
 
 /* Telemetry message (Core 0 -> Core 1) */
@@ -69,6 +73,14 @@ typedef struct {
             int16_t channels[8];
             uint8_t count;
         } rc;
+
+        struct {
+            char     name[17];      /* param name (null-terminated, 16 chars max) */
+            float    value;
+            uint8_t  type;          /* MAV_PARAM_TYPE (6 = REAL32) */
+            uint16_t count;         /* total param count */
+            uint16_t index;         /* param index */
+        } param_value;
     } data;
 } rpc_telemetry_msg_t;
 
@@ -80,6 +92,7 @@ typedef struct {
         struct { uint8_t arm; } arm_cmd;
         struct { uint8_t mode; } mode_cmd;
         struct { int16_t channels[8]; } rc_override;
-        struct { uint16_t param_id; float value; } param_set;
+        struct { char name[17]; float value; } param_set;
+        struct { char name[17]; int16_t index; } param_request;
     } data;
 } rpc_command_msg_t;

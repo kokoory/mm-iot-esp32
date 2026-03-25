@@ -37,6 +37,7 @@
 #include "../drivers/gps_nmea.h"
 #include "../estimator/ahrs.h"
 #include "../estimator/altitude_estimator.h"
+#include "../common/param.h"
 
 static const char *TAG = "sensor_agent";
 
@@ -154,8 +155,9 @@ static void sensor_task(void *param)
     }
 
     /* ---- Initialize estimators ---- */
-    ahrs_init(&s_ahrs, 0.1f);
+    ahrs_init(&s_ahrs, param_get(PARAM_AHRS_BETA));
     alt_estimator_init(&s_alt_est);
+    s_alt_est.alpha = param_get(PARAM_ALT_CF_ALPHA);
 
     /* ---- Advertise uORB topics ---- */
     orb_advertise(ORB_ID_SENSOR_IMU, sizeof(sensor_imu_t));

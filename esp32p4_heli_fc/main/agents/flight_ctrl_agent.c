@@ -32,13 +32,9 @@
 #include "../control/attitude_control.h"
 #include "../control/rate_control.h"
 #include "../control/pos_control.h"
+#include "../common/param.h"
 
 static const char *TAG = "flight_ctrl";
-
-/* Maximum attitude angle from RC input (radians) */
-#define MAX_ROLL_ANGLE   DEG_TO_RAD(45.0f)
-#define MAX_PITCH_ANGLE  DEG_TO_RAD(45.0f)
-#define MAX_YAW_RATE     DEG_TO_RAD(180.0f)  /* rad/s */
 
 /* Nominal controller timestep (500 Hz) — used for init, overridden by measured dt */
 #define CTRL_DT_NOMINAL  0.002f
@@ -147,11 +143,11 @@ static void flight_ctrl_task(void *param)
                 yaw_sp_initialized = true;
             }
             /* Yaw: integrate RC yaw rate command into persistent setpoint */
-            yaw_sp += rc_yaw * MAX_YAW_RATE * ctrl_dt;
+            yaw_sp += rc_yaw * DEG_TO_RAD(param_get(PARAM_MAX_YAW_RATE_DEG)) * ctrl_dt;
 
             float att_sp[3];
-            att_sp[0] = rc_roll  * MAX_ROLL_ANGLE;    /* roll angle setpoint */
-            att_sp[1] = rc_pitch * MAX_PITCH_ANGLE;   /* pitch angle setpoint */
+            att_sp[0] = rc_roll  * DEG_TO_RAD(param_get(PARAM_MAX_ROLL_DEG));    /* roll angle setpoint */
+            att_sp[1] = rc_pitch * DEG_TO_RAD(param_get(PARAM_MAX_PITCH_DEG));   /* pitch angle setpoint */
             att_sp[2] = yaw_sp;
 
             float att_meas[3] = {att.roll, att.pitch, att.yaw};
@@ -200,11 +196,11 @@ static void flight_ctrl_task(void *param)
                 yaw_sp = att.yaw;
                 yaw_sp_initialized = true;
             }
-            yaw_sp += rc_yaw * MAX_YAW_RATE * ctrl_dt;
+            yaw_sp += rc_yaw * DEG_TO_RAD(param_get(PARAM_MAX_YAW_RATE_DEG)) * ctrl_dt;
 
             float att_sp[3];
-            att_sp[0] = rc_roll  * MAX_ROLL_ANGLE;
-            att_sp[1] = rc_pitch * MAX_PITCH_ANGLE;
+            att_sp[0] = rc_roll  * DEG_TO_RAD(param_get(PARAM_MAX_ROLL_DEG));
+            att_sp[1] = rc_pitch * DEG_TO_RAD(param_get(PARAM_MAX_PITCH_DEG));
             att_sp[2] = yaw_sp;
 
             float att_meas[3] = {att.roll, att.pitch, att.yaw};

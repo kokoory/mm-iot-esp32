@@ -6,16 +6,13 @@
 
 #include "attitude_control.h"
 #include "../common/math_utils.h"
-
-#define DEFAULT_KP_ROLL   4.5f
-#define DEFAULT_KP_PITCH  4.5f
-#define DEFAULT_KP_YAW    2.0f
+#include "../common/param.h"
 
 void attitude_control_init(attitude_controller_t *ac)
 {
-    ac->kp_roll  = DEFAULT_KP_ROLL;
-    ac->kp_pitch = DEFAULT_KP_PITCH;
-    ac->kp_yaw   = DEFAULT_KP_YAW;
+    ac->kp_roll  = param_get(PARAM_ATT_ROLL_KP);
+    ac->kp_pitch = param_get(PARAM_ATT_PITCH_KP);
+    ac->kp_yaw   = param_get(PARAM_ATT_YAW_KP);
 }
 
 void attitude_control_update(const attitude_controller_t *ac,
