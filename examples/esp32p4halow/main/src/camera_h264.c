@@ -88,7 +88,7 @@ static const char *TAG = "camera_h264";
 #define HAS_HW_JPEG 0
 #endif
 
-#if __has_include("esp_h264_enc_single.h")
+#if __has_include("esp_h264_enc_single_hw.h")
 #define HAS_HW_H264 1
 #else
 #define HAS_HW_H264 0
@@ -111,9 +111,9 @@ static const char *TAG = "camera_h264";
 #endif
 
 #if HAS_HW_H264
-#include "esp_h264_enc_single.h"
-#include "esp_h264_enc_param_hw.h"
 #include "esp_h264_types.h"
+#include "esp_h264_enc_single.h"
+#include "esp_h264_enc_single_hw.h"
 #endif
 
 /* Module state */
@@ -458,7 +458,7 @@ esp_err_t camera_h264_init(void)
         s_cam.h264_handle = NULL;
     }
 #else
-    ESP_LOGW(TAG, "HW H.264 encoder not available (esp_h264_enc_single.h missing)");
+    ESP_LOGW(TAG, "HW H.264 encoder not available (esp_h264_enc_single_hw.h missing)");
     ESP_LOGW(TAG, "Add espressif/esp_h264 to idf_component.yml");
 #endif
 
@@ -542,17 +542,17 @@ static void camera_capture_task(void *arg)
             in_frame.raw_data.len = s_cam.raw_buf_size;
 
             esp_h264_enc_out_frame_t out_frame = {
-                .layer_data = {{
+                .raw_data = {
                     .buffer = s_cam.h264_buf[wr_idx],
                     .len = H264_BUF_SIZE,
-                }},
+                },
             };
 
             esp_h264_err_t h264_ret = esp_h264_enc_process(s_cam.h264_handle,
                                                             &in_frame, &out_frame);
-            if (h264_ret == ESP_H264_ERR_OK && out_frame.layer_data[0].len > 0) {
+            if (h264_ret == ESP_H264_ERR_OK && out_frame.length > 0) {
                 if (xSemaphoreTake(s_cam.h264_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    s_cam.h264_size[wr_idx] = out_frame.layer_data[0].len;
+                    s_cam.h264_size[wr_idx] = out_frame.length;
                     s_cam.h264_write_idx = (wr_idx + 1) % NUM_BUFS;
                     s_cam.h264_read_idx = wr_idx;
                     xSemaphoreGive(s_cam.h264_mutex);
