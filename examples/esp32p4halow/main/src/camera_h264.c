@@ -136,6 +136,9 @@ static struct {
     SemaphoreHandle_t h264_frame_ready;
     SemaphoreHandle_t h264_mutex;
 
+    /* UYVY conversion buffer for H.264 (HW encoder doesn't accept RGB565) */
+    uint8_t *uyvy_buf;
+
     /* Raw frame double buffers (RGB565 from ISP) */
     uint8_t *raw_buf[NUM_BUFS];
     size_t raw_buf_size;
@@ -280,6 +283,53 @@ static esp_err_t sensor_init(void)
 }
 #endif /* HAS_CAMERA_PIPELINE */
 
+/* RGB565 (little-endian) → UYVY conversion for H.264 HW encoder */
+#if HAS_HW_H264
+static void rgb565_to_uyvy(const uint8_t *rgb565, uint8_t *uyvy, int width, int height)
+{
+    const uint16_t *src = (const uint16_t *)rgb565;
+    int total_pixels = width * height;
+
+    for (int i = 0; i < total_pixels; i += 2) {
+        /* Pixel 0 */
+        uint16_t p0 = src[i];
+        int r0 = (p0 >> 11) & 0x1F;
+        int g0 = (p0 >> 5) & 0x3F;
+        int b0 = p0 & 0x1F;
+        r0 = (r0 << 3) | (r0 >> 2);  /* 5-bit to 8-bit */
+        g0 = (g0 << 2) | (g0 >> 4);  /* 6-bit to 8-bit */
+        b0 = (b0 << 3) | (b0 >> 2);  /* 5-bit to 8-bit */
+
+        /* Pixel 1 */
+        uint16_t p1 = src[i + 1];
+        int r1 = (p1 >> 11) & 0x1F;
+        int g1 = (p1 >> 5) & 0x3F;
+        int b1 = p1 & 0x1F;
+        r1 = (r1 << 3) | (r1 >> 2);
+        g1 = (g1 << 2) | (g1 >> 4);
+        b1 = (b1 << 3) | (b1 >> 2);
+
+        /* Y = 0.299R + 0.587G + 0.114B (fixed-point) */
+        int y0 = (( 66 * r0 + 129 * g0 +  25 * b0 + 128) >> 8) + 16;
+        int y1 = (( 66 * r1 + 129 * g1 +  25 * b1 + 128) >> 8) + 16;
+
+        /* U, V from average of pixel pair */
+        int ra = (r0 + r1) >> 1;
+        int ga = (g0 + g1) >> 1;
+        int ba = (b0 + b1) >> 1;
+        int u = ((-38 * ra -  74 * ga + 112 * ba + 128) >> 8) + 128;
+        int v = ((112 * ra -  94 * ga -  18 * ba + 128) >> 8) + 128;
+
+        /* UYVY packing: U Y0 V Y1 */
+        int out_idx = i * 2;
+        uyvy[out_idx + 0] = (uint8_t)(u < 0 ? 0 : (u > 255 ? 255 : u));
+        uyvy[out_idx + 1] = (uint8_t)(y0 < 0 ? 0 : (y0 > 255 ? 255 : y0));
+        uyvy[out_idx + 2] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        uyvy[out_idx + 3] = (uint8_t)(y1 < 0 ? 0 : (y1 > 255 ? 255 : y1));
+    }
+}
+#endif
+
 /* ========== Initialization ========== */
 
 esp_err_t camera_h264_init(void)
@@ -336,9 +386,17 @@ esp_err_t camera_h264_init(void)
         }
     }
 
-    ESP_LOGI(TAG, "Buffers allocated: %d x (raw=%uKB + jpeg=%uKB + h264=%uKB)",
+    /* UYVY conversion buffer (same size as raw RGB565: 2 bytes/pixel) */
+    s_cam.uyvy_buf = heap_caps_malloc(s_cam.raw_buf_size, MALLOC_CAP_SPIRAM);
+    if (!s_cam.uyvy_buf) {
+        ESP_LOGE(TAG, "Failed to allocate UYVY conversion buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Buffers allocated: %d x (raw=%uKB + jpeg=%uKB + h264=%uKB) + uyvy=%uKB",
              NUM_BUFS, (unsigned)(s_cam.raw_buf_size/1024),
-             (unsigned)(JPEG_BUF_SIZE/1024), (unsigned)(H264_BUF_SIZE/1024));
+             (unsigned)(JPEG_BUF_SIZE/1024), (unsigned)(H264_BUF_SIZE/1024),
+             (unsigned)(s_cam.raw_buf_size/1024));
 
 #if HAS_CAMERA_PIPELINE
     /* LDO for MIPI PHY */
@@ -441,7 +499,7 @@ esp_err_t camera_h264_init(void)
             .qp_min = H264_QP_MIN,
             .qp_max = H264_QP_MAX,
         },
-        .pic_type = ESP_H264_RAW_FMT_RGB565_LE,
+        .pic_type = ESP_H264_RAW_FMT_UYVY,
     };
     esp_h264_err_t h264_ret = esp_h264_enc_hw_new(&h264_cfg, &s_cam.h264_handle);
     if (h264_ret == ESP_H264_ERR_OK) {
@@ -535,9 +593,12 @@ static void camera_capture_task(void *arg)
         /* === H.264 encode (for /h264 stream) === */
 #if HAS_HW_H264
         if (s_cam.h264_handle) {
+            /* Convert RGB565 → UYVY (HW encoder doesn't accept RGB565) */
+            rgb565_to_uyvy(frame_data, s_cam.uyvy_buf, CAM_WIDTH, CAM_HEIGHT);
+
             int wr_idx = s_cam.h264_write_idx;
             esp_h264_enc_in_frame_t in_frame = {
-                .raw_data = { .buffer = frame_data },
+                .raw_data = { .buffer = s_cam.uyvy_buf },
             };
             in_frame.raw_data.len = s_cam.raw_buf_size;
 
