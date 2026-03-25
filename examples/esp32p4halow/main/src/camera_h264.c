@@ -42,7 +42,7 @@ static const char *TAG = "camera_h264";
  * OV5647 supported formats (from esp_cam_sensor):
  *   - MIPI_2lane_24Minput_RAW8_800x640_50fps
  *   - MIPI_2lane_24Minput_RAW8_800x1280_50fps
- *   - MIPI_2lane_24Minput_RAW8_1024x600_30fps
+ *   - MIPI_2lane_24Minput_RAW8_800x800_50fps
  */
 
 /* I2C / SCCB pins for camera sensor */
@@ -66,8 +66,8 @@ static const char *TAG = "camera_h264";
 #define JPEG_QUALITY        80
 #define JPEG_BUF_SIZE       (200 * 1024)  /* 200KB should be enough for 800x640 */
 
-/* Double buffer for JPEG output */
-#define NUM_JPEG_BUFS       2
+/* Double buffer for raw frames and JPEG output */
+#define NUM_BUFS            2
 
 /* Check for required ESP-IDF components */
 #if __has_include("esp_cam_ctlr_csi.h") && __has_include("driver/isp.h")
@@ -102,13 +102,21 @@ static const char *TAG = "camera_h264";
 static struct {
     bool initialized;
 
-    /* JPEG double buffer */
-    uint8_t *jpeg_buf[NUM_JPEG_BUFS];
-    size_t jpeg_size[NUM_JPEG_BUFS];
+    /* JPEG double buffer (output) */
+    uint8_t *jpeg_buf[NUM_BUFS];
+    size_t jpeg_size[NUM_BUFS];
     volatile int jpeg_write_idx;
     volatile int jpeg_read_idx;
-    SemaphoreHandle_t frame_ready;
+    SemaphoreHandle_t frame_ready;    /* signaled when JPEG frame available */
     SemaphoreHandle_t jpeg_mutex;
+
+    /* Raw frame double buffers (RGB565 from ISP) */
+    uint8_t *raw_buf[NUM_BUFS];
+    size_t raw_buf_size;
+
+    /* ISR → task signaling for frame capture */
+    SemaphoreHandle_t frame_captured; /* signaled from ISR when CSI frame done */
+    volatile int captured_buf_idx;    /* which raw_buf has the completed frame */
 
     /* Frame statistics */
     volatile float fps;
@@ -124,10 +132,6 @@ static struct {
 #if HAS_HW_JPEG
     jpeg_encoder_handle_t jpeg_handle;
 #endif
-
-    /* Raw frame buffer (RGB565 from ISP) */
-    uint8_t *raw_buf;
-    size_t raw_buf_size;
 } s_cam = {0};
 
 /* Forward declarations */
@@ -136,23 +140,41 @@ static esp_err_t stream_handler(httpd_req_t *req);
 static esp_err_t status_handler(httpd_req_t *req);
 
 #if HAS_CAMERA_PIPELINE
-/* CSI callback: provide a new buffer for next frame capture */
+
+/*
+ * CSI ISR callback: provide a new buffer for next frame capture.
+ * Called from ISR after a frame is finished. Alternates between double buffers.
+ */
 static bool IRAM_ATTR on_get_new_trans(esp_cam_ctlr_handle_t handle,
                                         esp_cam_ctlr_trans_t *trans,
                                         void *user_data)
 {
-    esp_cam_ctlr_trans_t *ref = (esp_cam_ctlr_trans_t *)user_data;
-    trans->buffer = ref->buffer;
-    trans->buflen = ref->buflen;
+    /* Give the OTHER buffer (not the one just captured) for next frame */
+    int next_idx = (s_cam.captured_buf_idx + 1) % NUM_BUFS;
+    trans->buffer = s_cam.raw_buf[next_idx];
+    trans->buflen = s_cam.raw_buf_size;
     return false;
 }
 
-/* CSI callback: frame capture finished */
+/*
+ * CSI ISR callback: frame capture finished.
+ * Signal the capture task so it can encode the frame.
+ */
 static bool IRAM_ATTR on_trans_finished(esp_cam_ctlr_handle_t handle,
                                          esp_cam_ctlr_trans_t *trans,
                                          void *user_data)
 {
-    return false;
+    /* Determine which buffer was just completed */
+    for (int i = 0; i < NUM_BUFS; i++) {
+        if (trans->buffer == s_cam.raw_buf[i]) {
+            s_cam.captured_buf_idx = i;
+            break;
+        }
+    }
+
+    BaseType_t higher_prio_woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_cam.frame_captured, &higher_prio_woken);
+    return higher_prio_woken == pdTRUE;
 }
 
 /*
@@ -262,7 +284,7 @@ esp_err_t camera_h264_init(void)
     ESP_LOGI(TAG, "Target: %dx%d, format: %s", CAM_WIDTH, CAM_HEIGHT, CAM_FORMAT);
 
     /* Allocate JPEG output double buffers in PSRAM */
-    for (int i = 0; i < NUM_JPEG_BUFS; i++) {
+    for (int i = 0; i < NUM_BUFS; i++) {
         s_cam.jpeg_buf[i] = heap_caps_malloc(JPEG_BUF_SIZE, MALLOC_CAP_SPIRAM);
         if (!s_cam.jpeg_buf[i]) {
             ESP_LOGE(TAG, "Failed to allocate JPEG buffer %d", i);
@@ -272,9 +294,21 @@ esp_err_t camera_h264_init(void)
 
     s_cam.frame_ready = xSemaphoreCreateBinary();
     s_cam.jpeg_mutex = xSemaphoreCreateMutex();
+    s_cam.frame_captured = xSemaphoreCreateBinary();
 
-    /* Allocate raw frame buffer (RGB565: 2 bytes per pixel) */
+    /* Allocate raw frame double buffers (RGB565: 2 bytes per pixel) */
     s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;
+    for (int i = 0; i < NUM_BUFS; i++) {
+        s_cam.raw_buf[i] = heap_caps_aligned_calloc(64, 1, s_cam.raw_buf_size,
+                                                     MALLOC_CAP_SPIRAM);
+        if (!s_cam.raw_buf[i]) {
+            ESP_LOGE(TAG, "Failed to allocate raw frame buffer %d (%u bytes)",
+                     i, (unsigned)s_cam.raw_buf_size);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    ESP_LOGI(TAG, "Allocated %d raw buffers (%u bytes each) + %d JPEG buffers",
+             NUM_BUFS, (unsigned)s_cam.raw_buf_size, NUM_BUFS);
 
 #if HAS_CAMERA_PIPELINE
     /*
@@ -302,23 +336,7 @@ esp_err_t camera_h264_init(void)
     }
 
     /*
-     * === Step 3: Allocate frame buffer with cache alignment ===
-     */
-    s_cam.raw_buf = heap_caps_aligned_calloc(64, 1, s_cam.raw_buf_size,
-                                              MALLOC_CAP_SPIRAM);
-    if (!s_cam.raw_buf) {
-        ESP_LOGE(TAG, "Failed to allocate raw frame buffer (%u bytes)",
-                 (unsigned)s_cam.raw_buf_size);
-        return ESP_ERR_NO_MEM;
-    }
-
-    esp_cam_ctlr_trans_t cam_trans = {
-        .buffer = s_cam.raw_buf,
-        .buflen = s_cam.raw_buf_size,
-    };
-
-    /*
-     * === Step 4: CSI controller init ===
+     * === Step 3: CSI controller init ===
      */
     esp_cam_ctlr_csi_config_t csi_config = {
         .ctlr_id = 0,
@@ -338,12 +356,12 @@ esp_err_t camera_h264_init(void)
         return ret;
     }
 
-    /* Register CSI event callbacks */
+    /* Register CSI event callbacks for frame management */
     esp_cam_ctlr_evt_cbs_t cbs = {
         .on_get_new_trans = on_get_new_trans,
         .on_trans_finished = on_trans_finished,
     };
-    ESP_RETURN_ON_ERROR(esp_cam_ctlr_register_event_callbacks(s_cam.cam_handle, &cbs, &cam_trans),
+    ESP_RETURN_ON_ERROR(esp_cam_ctlr_register_event_callbacks(s_cam.cam_handle, &cbs, NULL),
                         TAG, "CSI callback registration failed");
 
     ESP_RETURN_ON_ERROR(esp_cam_ctlr_enable(s_cam.cam_handle),
@@ -352,7 +370,7 @@ esp_err_t camera_h264_init(void)
     ESP_LOGI(TAG, "MIPI-CSI controller initialized (2-lane, %dx%d)", CAM_WIDTH, CAM_HEIGHT);
 
     /*
-     * === Step 5: ISP pipeline (RAW8 → RGB565) ===
+     * === Step 4: ISP pipeline (RAW8 → RGB565) ===
      */
     isp_proc_handle_t isp_proc = NULL;
     esp_isp_processor_cfg_t isp_config = {
@@ -374,8 +392,13 @@ esp_err_t camera_h264_init(void)
     }
 
     /*
-     * === Step 6: Start CSI capture ===
+     * === Step 5: Start CSI capture ===
+     *
+     * After start, the CSI ISR will call on_get_new_trans to get the first
+     * buffer, then on_trans_finished when a frame completes.
      */
+    s_cam.captured_buf_idx = 0;  /* First capture goes to buf[0] */
+
     ret = esp_cam_ctlr_start(s_cam.cam_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "CSI start failed: %s", esp_err_to_name(ret));
@@ -386,17 +409,11 @@ esp_err_t camera_h264_init(void)
 #else
     ESP_LOGW(TAG, "MIPI-CSI driver headers not available - camera in stub mode");
     ESP_LOGW(TAG, "Required: esp_cam_ctlr_csi.h, driver/isp.h (ESP-IDF v5.3+)");
-
-    /* Allocate raw buffer anyway for stub mode */
-    s_cam.raw_buf = heap_caps_malloc(s_cam.raw_buf_size, MALLOC_CAP_SPIRAM);
-    if (!s_cam.raw_buf) {
-        return ESP_ERR_NO_MEM;
-    }
 #endif /* HAS_CAMERA_PIPELINE */
 
 #if HAS_HW_JPEG
     /*
-     * === Step 7: Hardware JPEG encoder init ===
+     * === Step 6: Hardware JPEG encoder init ===
      */
     jpeg_encode_engine_cfg_t enc_cfg = {
         .timeout_ms = 100,
@@ -409,6 +426,7 @@ esp_err_t camera_h264_init(void)
     ESP_LOGI(TAG, "Hardware JPEG encoder initialized");
 #else
     ESP_LOGW(TAG, "HW JPEG encoder not available (driver/jpeg_encode.h missing)");
+    ESP_LOGW(TAG, "Add esp_driver_jpeg to PRIV_REQUIRES if available in your ESP-IDF");
 #endif
 
     /* Start the capture + encode task */
@@ -429,22 +447,23 @@ static void camera_capture_task(void *arg)
     ESP_LOGI(TAG, "Capture task started");
 
 #if HAS_CAMERA_PIPELINE
-    esp_cam_ctlr_trans_t trans = {
-        .buffer = s_cam.raw_buf,
-        .buflen = s_cam.raw_buf_size,
-    };
-
     while (1) {
-        /* Block until a frame is captured from MIPI-CSI */
-        esp_err_t ret = esp_cam_ctlr_receive(s_cam.cam_handle, &trans,
-                                              pdMS_TO_TICKS(2000));
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Frame receive timeout");
+        /*
+         * Wait for the CSI ISR to signal that a frame has been captured.
+         * The ISR sets captured_buf_idx to indicate which buffer has the frame.
+         * Meanwhile, the ISR provides the OTHER buffer for the next capture
+         * via on_get_new_trans (double buffering).
+         */
+        if (xSemaphoreTake(s_cam.frame_captured, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            ESP_LOGW(TAG, "Frame capture timeout - check camera ribbon cable");
             continue;
         }
 
+        int buf_idx = s_cam.captured_buf_idx;
+        uint8_t *frame_data = s_cam.raw_buf[buf_idx];
+
         /* Sync cache: DMA wrote to PSRAM, CPU needs to read it */
-        esp_cache_msync(s_cam.raw_buf, s_cam.raw_buf_size,
+        esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
         int wr_idx = s_cam.jpeg_write_idx;
@@ -460,30 +479,26 @@ static void camera_capture_task(void *arg)
         };
 
         uint32_t jpg_size = 0;
-        ret = jpeg_encoder_process(s_cam.jpeg_handle, &jpeg_cfg,
-                                   s_cam.raw_buf, s_cam.raw_buf_size,
-                                   s_cam.jpeg_buf[wr_idx], JPEG_BUF_SIZE,
-                                   &jpg_size);
+        esp_err_t ret = jpeg_encoder_process(s_cam.jpeg_handle, &jpeg_cfg,
+                                              frame_data, s_cam.raw_buf_size,
+                                              s_cam.jpeg_buf[wr_idx], JPEG_BUF_SIZE,
+                                              &jpg_size);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
             continue;
         }
-#else
-        /* No HW JPEG: can't encode, skip */
-        uint32_t jpg_size = 0;
-        continue;
-#endif
 
-        /* Update JPEG buffer */
+        /* Update JPEG buffer for HTTP streaming */
         if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_cam.jpeg_size[wr_idx] = jpg_size;
-            s_cam.jpeg_write_idx = (wr_idx + 1) % NUM_JPEG_BUFS;
-            s_cam.jpeg_read_idx = wr_idx;  /* Point reader to latest frame */
+            s_cam.jpeg_write_idx = (wr_idx + 1) % NUM_BUFS;
+            s_cam.jpeg_read_idx = wr_idx;
             xSemaphoreGive(s_cam.jpeg_mutex);
         }
 
         /* Signal HTTP handler that a frame is ready */
         xSemaphoreGive(s_cam.frame_ready);
+#endif /* HAS_HW_JPEG */
 
         /* Update FPS stats */
         s_cam.frame_count++;
@@ -563,11 +578,17 @@ static esp_err_t status_handler(httpd_req_t *req)
     char buf[256];
     snprintf(buf, sizeof(buf),
         "{\"initialized\":%s,\"resolution\":\"%dx%d\",\"fps\":%.1f,"
-        "\"encoder\":\"jpeg_hw\",\"transport\":\"halow\","
+        "\"encoder\":\"%s\",\"transport\":\"halow\","
         "\"pipeline\":\"csi_isp_jpeg\"}",
         s_cam.initialized ? "true" : "false",
         CAM_WIDTH, CAM_HEIGHT,
-        s_cam.fps);
+        s_cam.fps,
+#if HAS_HW_JPEG
+        "jpeg_hw"
+#else
+        "none"
+#endif
+        );
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
