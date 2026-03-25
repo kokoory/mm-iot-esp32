@@ -152,8 +152,13 @@ static struct {
     uint32_t frame_count;
     int64_t stats_start_time;
 
-    /* Camera task handle */
+    /* Task handles */
     TaskHandle_t cam_task_handle;
+    TaskHandle_t h264_task_handle;
+
+    /* Shared frame pointer for H.264 task */
+    SemaphoreHandle_t h264_encode_ready;
+    uint8_t *h264_src_frame;
 
 #if HAS_CAMERA_PIPELINE
     esp_cam_ctlr_handle_t cam_handle;
@@ -168,6 +173,7 @@ static struct {
 
 /* Forward declarations */
 static void camera_capture_task(void *arg);
+static void h264_encode_task(void *arg);
 static esp_err_t stream_handler(httpd_req_t *req);
 static esp_err_t h264_stream_handler(httpd_req_t *req);
 static esp_err_t status_handler(httpd_req_t *req);
@@ -356,6 +362,7 @@ esp_err_t camera_h264_init(void)
     s_cam.jpeg_mutex = xSemaphoreCreateMutex();
     s_cam.frame_captured = xSemaphoreCreateBinary();
     s_cam.h264_frame_ready = xSemaphoreCreateBinary();
+    s_cam.h264_encode_ready = xSemaphoreCreateBinary();
     s_cam.h264_mutex = xSemaphoreCreateMutex();
 
     /* Allocate buffers */
@@ -531,9 +538,15 @@ esp_err_t camera_h264_init(void)
     ESP_LOGW(TAG, "Add espressif/esp_h264 to idf_component.yml");
 #endif
 
-    /* Start capture task */
+    /* Start capture task (core 1) and H.264 encode task (core 0) */
     xTaskCreatePinnedToCore(camera_capture_task, "cam_task", 8192, NULL, 5,
                             &s_cam.cam_task_handle, 1);
+#if HAS_HW_H264
+    if (s_cam.h264_handle) {
+        xTaskCreatePinnedToCore(h264_encode_task, "h264_task", 8192, NULL, 4,
+                                &s_cam.h264_task_handle, 0);
+    }
+#endif
 
     s_cam.initialized = true;
     s_cam.stats_start_time = esp_timer_get_time();
@@ -542,15 +555,15 @@ esp_err_t camera_h264_init(void)
     return ESP_OK;
 }
 
-/* ========== Camera Capture + Encode Task ========== */
+/* ========== Camera Capture Task (core 1): capture + JPEG ========== */
 
 static void camera_capture_task(void *arg)
 {
-    ESP_LOGI(TAG, "Capture task started");
+    ESP_LOGI(TAG, "Capture + JPEG task started (core %d)", xPortGetCoreID());
 
 #if HAS_CAMERA_PIPELINE
-    uint32_t skip_count = 0;
-    uint32_t h264_frame_num = 0;
+    int64_t last_encode_us = 0;
+    const int64_t frame_interval_us = 1000000 / STREAM_TARGET_FPS;
 
     while (1) {
         if (xSemaphoreTake(s_cam.frame_captured, pdMS_TO_TICKS(2000)) != pdTRUE) {
@@ -558,12 +571,12 @@ static void camera_capture_task(void *arg)
             continue;
         }
 
-        /* Skip frames to limit encode rate for HaLow bandwidth */
-        skip_count++;
-        if (skip_count < STREAM_FRAME_SKIP) {
+        /* Time-based frame skip (more consistent than counter-based) */
+        int64_t now = esp_timer_get_time();
+        if ((now - last_encode_us) < frame_interval_us) {
             continue;
         }
-        skip_count = 0;
+        last_encode_us = now;
 
         int buf_idx = s_cam.captured_buf_idx;
         uint8_t *frame_data = s_cam.raw_buf[buf_idx];
@@ -572,7 +585,7 @@ static void camera_capture_task(void *arg)
         esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        /* === JPEG encode (for MJPEG /stream) === */
+        /* === JPEG encode (HW, fast) === */
 #if HAS_HW_JPEG
         {
             int wr_idx = s_cam.jpeg_write_idx;
@@ -601,43 +614,16 @@ static void camera_capture_task(void *arg)
         }
 #endif
 
-        /* === H.264 encode (for /h264 stream) === */
+        /* Notify H.264 task (runs in parallel on core 0) */
 #if HAS_HW_H264
         if (s_cam.h264_handle) {
-            /* Convert RGB565 → O_UYY_E_VYY (HW encoder native format) */
-            rgb565_to_ouyy_evyy(frame_data, s_cam.uyvy_buf, CAM_WIDTH, CAM_HEIGHT);
-
-            int wr_idx = s_cam.h264_write_idx;
-            esp_h264_enc_in_frame_t in_frame = {
-                .raw_data = { .buffer = s_cam.uyvy_buf },
-            };
-            in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
-
-            esp_h264_enc_out_frame_t out_frame = {
-                .raw_data = {
-                    .buffer = s_cam.h264_buf[wr_idx],
-                    .len = H264_BUF_SIZE,
-                },
-            };
-
-            esp_h264_err_t h264_ret = esp_h264_enc_process(s_cam.h264_handle,
-                                                            &in_frame, &out_frame);
-            if (h264_ret == ESP_H264_ERR_OK && out_frame.length > 0) {
-                if (xSemaphoreTake(s_cam.h264_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    s_cam.h264_size[wr_idx] = out_frame.length;
-                    s_cam.h264_write_idx = (wr_idx + 1) % NUM_BUFS;
-                    s_cam.h264_read_idx = wr_idx;
-                    xSemaphoreGive(s_cam.h264_mutex);
-                }
-                xSemaphoreGive(s_cam.h264_frame_ready);
-                h264_frame_num++;
-            }
+            s_cam.h264_src_frame = frame_data;
+            xSemaphoreGive(s_cam.h264_encode_ready);
         }
 #endif
 
         /* Update FPS stats */
         s_cam.frame_count++;
-        int64_t now = esp_timer_get_time();
         int64_t elapsed = now - s_cam.stats_start_time;
         if (elapsed > 1000000) {
             s_cam.fps = (float)s_cam.frame_count * 1000000.0f / (float)elapsed;
@@ -651,6 +637,55 @@ static void camera_capture_task(void *arg)
         ESP_LOGW(TAG, "Camera stub mode - no frames available");
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
+#endif
+}
+
+/* ========== H.264 Encode Task (core 0): color convert + encode ========== */
+
+static void h264_encode_task(void *arg)
+{
+    ESP_LOGI(TAG, "H.264 encode task started (core %d)", xPortGetCoreID());
+
+#if HAS_HW_H264
+    while (1) {
+        if (xSemaphoreTake(s_cam.h264_encode_ready, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            continue;
+        }
+
+        uint8_t *frame_data = s_cam.h264_src_frame;
+        if (!frame_data) continue;
+
+        /* RGB565 → O_UYY_E_VYY (SW conversion) */
+        rgb565_to_ouyy_evyy(frame_data, s_cam.uyvy_buf, CAM_WIDTH, CAM_HEIGHT);
+
+        /* HW H.264 encode */
+        int wr_idx = s_cam.h264_write_idx;
+        esp_h264_enc_in_frame_t in_frame = {
+            .raw_data = { .buffer = s_cam.uyvy_buf },
+        };
+        in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
+
+        esp_h264_enc_out_frame_t out_frame = {
+            .raw_data = {
+                .buffer = s_cam.h264_buf[wr_idx],
+                .len = H264_BUF_SIZE,
+            },
+        };
+
+        esp_h264_err_t h264_ret = esp_h264_enc_process(s_cam.h264_handle,
+                                                        &in_frame, &out_frame);
+        if (h264_ret == ESP_H264_ERR_OK && out_frame.length > 0) {
+            if (xSemaphoreTake(s_cam.h264_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                s_cam.h264_size[wr_idx] = out_frame.length;
+                s_cam.h264_write_idx = (wr_idx + 1) % NUM_BUFS;
+                s_cam.h264_read_idx = wr_idx;
+                xSemaphoreGive(s_cam.h264_mutex);
+            }
+            xSemaphoreGive(s_cam.h264_frame_ready);
+        }
+    }
+#else
+    vTaskDelete(NULL);
 #endif
 }
 
