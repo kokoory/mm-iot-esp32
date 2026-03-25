@@ -265,29 +265,70 @@ static void sysmon_task(void *param)
 
         /* ---- 3. Determine failsafe state (highest severity wins) ---- */
         /* Priority: SENSOR_FAILURE > BATTERY_CRITICAL > RC_LOST > BATTERY_LOW > NONE */
-        failsafe = FAILSAFE_NONE;
+        failsafe_state_t new_failsafe = FAILSAFE_NONE;
 
         if (batt_msg.warning) {
-            failsafe = FAILSAFE_BATTERY_LOW;
+            new_failsafe = FAILSAFE_BATTERY_LOW;
         }
         if (!rc_ok && arm_state == ARM_STATE_ARMED) {
-            failsafe = FAILSAFE_RC_LOST;
+            new_failsafe = FAILSAFE_RC_LOST;
         }
         if (batt_msg.critical) {
-            failsafe = FAILSAFE_BATTERY_CRITICAL;
+            new_failsafe = FAILSAFE_BATTERY_CRITICAL;
         }
         if (!imu_ok) {
-            failsafe = FAILSAFE_SENSOR_FAILURE;
+            new_failsafe = FAILSAFE_SENSOR_FAILURE;
         }
 
-        /* ---- 4. Arm/disarm logic ---- */
-        /* Auto-disarm on critical failsafe */
-        if (failsafe == FAILSAFE_BATTERY_CRITICAL ||
-            failsafe == FAILSAFE_SENSOR_FAILURE ||
-            failsafe == FAILSAFE_RC_LOST) {
-            if (arm_state == ARM_STATE_ARMED) {
-                ESP_LOGW(TAG, "FAILSAFE: auto-disarming (failsafe=%d)", failsafe);
+        /* Log failsafe transitions */
+        if (new_failsafe != failsafe && arm_state == ARM_STATE_ARMED) {
+            ESP_LOGW(TAG, "FAILSAFE: %d -> %d", failsafe, new_failsafe);
+        }
+        failsafe = new_failsafe;
+
+        /* ---- 4. Failsafe actions ---- */
+        if (arm_state == ARM_STATE_ARMED) {
+            switch (failsafe) {
+            case FAILSAFE_RC_LOST:
+                /* RC lost: trigger RTH if GPS available, otherwise LAND */
+                if (flight_mode != FLIGHT_MODE_RTH &&
+                    flight_mode != FLIGHT_MODE_LAND) {
+                    if (gps_ok) {
+                        ESP_LOGW(TAG, "FAILSAFE RC_LOST: switching to RTH");
+                        flight_mode = FLIGHT_MODE_RTH;
+                    } else {
+                        ESP_LOGW(TAG, "FAILSAFE RC_LOST: no GPS, switching to LAND");
+                        flight_mode = FLIGHT_MODE_LAND;
+                    }
+                }
+                break;
+
+            case FAILSAFE_BATTERY_LOW:
+                /* Battery low: warn only (GCS notification via MAVLink) */
+                break;
+
+            case FAILSAFE_BATTERY_CRITICAL:
+                /* Battery critical: force LAND immediately */
+                if (flight_mode != FLIGHT_MODE_LAND) {
+                    ESP_LOGW(TAG, "FAILSAFE BATTERY_CRITICAL: forcing LAND");
+                    flight_mode = FLIGHT_MODE_LAND;
+                }
+                break;
+
+            case FAILSAFE_SENSOR_FAILURE:
+                /* IMU failure: immediate disarm (no reliable control possible) */
+                ESP_LOGE(TAG, "FAILSAFE SENSOR_FAILURE: IMU lost, disarming!");
                 arm_state = ARM_STATE_DISARMED;
+                break;
+
+            case FAILSAFE_GCS_LOST:
+                /* GCS link lost: continue current mode, warn only.
+                 * Pilot should have RC as backup. */
+                break;
+
+            case FAILSAFE_NONE:
+            default:
+                break;
             }
         }
 
