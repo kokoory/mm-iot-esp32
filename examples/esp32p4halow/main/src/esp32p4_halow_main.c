@@ -22,6 +22,7 @@
  *
  * Endpoints:
  *   http://<ip>/        - MJPEG camera stream (HW JPEG encoded)
+ *   http://<ip>/h264    - Raw H.264 stream (for GCS decoding)
  *   http://<ip>/status  - JSON system status
  *   UDP 14550           - MAVLink telemetry (GCS port)
  *   UDP 14555           - MAVLink telemetry (local listen)

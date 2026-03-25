@@ -11,3 +11,4 @@ dependencies:
   mmregdb:
     path: $MMIOT_ROOT/framework/src/mmregdb
   espressif/esp_cam_sensor: "^0.5.1"
+  espressif/esp_h264: "^1.0.0"
