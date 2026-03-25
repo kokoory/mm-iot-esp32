@@ -288,53 +288,46 @@ esp_err_t camera_h264_init(void)
     s_cam.frame_captured = xSemaphoreCreateBinary();
 
     /*
-     * Allocate buffers using jpeg_alloc_encoder_mem() for proper alignment.
-     * The ESP32-P4 HW JPEG encoder requires DMA-aligned buffers.
+     * Buffer allocation strategy:
+     *
+     * Raw frame buffers (CSI DMA → JPEG encoder input):
+     *   - Must be 64-byte (cache line) aligned for CSI DMA esp_cache_msync
+     *   - Size must also be multiple of 64 bytes
+     *   - Use heap_caps_aligned_calloc(64, ...) for CSI compatibility
+     *
+     * JPEG output buffers (JPEG encoder output → HTTP stream):
+     *   - Must use jpeg_alloc_encoder_mem() for HW JPEG DMA alignment
+     *   - The "bit stream not aligned" error only applies to output buffers
      */
     s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;  /* RGB565: 2 bytes/pixel */
+    /* Round up to cache line size (64 bytes) */
+    s_cam.raw_buf_size = (s_cam.raw_buf_size + 63) & ~63;
 
-#if HAS_HW_JPEG
     for (int i = 0; i < NUM_BUFS; i++) {
-        /* Raw input buffers (RGB565 from CSI/ISP) */
-        size_t raw_alloc_size = 0;
-        jpeg_encode_memory_alloc_cfg_t raw_mem_cfg = {
-            .buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER,
-        };
-        s_cam.raw_buf[i] = (uint8_t *)jpeg_alloc_encoder_mem(
-            s_cam.raw_buf_size, &raw_mem_cfg, &raw_alloc_size);
-        if (!s_cam.raw_buf[i]) {
-            ESP_LOGE(TAG, "Failed to allocate raw frame buffer %d", i);
-            return ESP_ERR_NO_MEM;
-        }
-
-        /* JPEG output buffers */
-        size_t jpg_alloc_size = 0;
-        jpeg_encode_memory_alloc_cfg_t jpg_mem_cfg = {
-            .buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER,
-        };
-        s_cam.jpeg_buf[i] = (uint8_t *)jpeg_alloc_encoder_mem(
-            JPEG_BUF_SIZE, &jpg_mem_cfg, &jpg_alloc_size);
-        if (!s_cam.jpeg_buf[i]) {
-            ESP_LOGE(TAG, "Failed to allocate JPEG buffer %d", i);
-            return ESP_ERR_NO_MEM;
-        }
-    }
-#else
-    /* Fallback: regular PSRAM allocation when HW JPEG not available */
-    for (int i = 0; i < NUM_BUFS; i++) {
+        /* Raw buffers: 64-byte aligned for CSI DMA cache sync */
         s_cam.raw_buf[i] = heap_caps_aligned_calloc(64, 1, s_cam.raw_buf_size,
                                                      MALLOC_CAP_SPIRAM);
         if (!s_cam.raw_buf[i]) {
             ESP_LOGE(TAG, "Failed to allocate raw frame buffer %d", i);
             return ESP_ERR_NO_MEM;
         }
+
+#if HAS_HW_JPEG
+        /* JPEG output buffers: HW JPEG encoder requires jpeg_alloc_encoder_mem */
+        size_t jpg_alloc_size = 0;
+        jpeg_encode_memory_alloc_cfg_t jpg_mem_cfg = {
+            .buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER,
+        };
+        s_cam.jpeg_buf[i] = (uint8_t *)jpeg_alloc_encoder_mem(
+            JPEG_BUF_SIZE, &jpg_mem_cfg, &jpg_alloc_size);
+#else
         s_cam.jpeg_buf[i] = heap_caps_malloc(JPEG_BUF_SIZE, MALLOC_CAP_SPIRAM);
+#endif
         if (!s_cam.jpeg_buf[i]) {
             ESP_LOGE(TAG, "Failed to allocate JPEG buffer %d", i);
             return ESP_ERR_NO_MEM;
         }
     }
-#endif
 
     ESP_LOGI(TAG, "Allocated %d raw buffers (%u bytes each) + %d JPEG buffers",
              NUM_BUFS, (unsigned)s_cam.raw_buf_size, NUM_BUFS);
