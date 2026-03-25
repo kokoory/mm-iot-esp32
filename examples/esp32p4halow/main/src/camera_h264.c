@@ -283,49 +283,60 @@ static esp_err_t sensor_init(void)
 }
 #endif /* HAS_CAMERA_PIPELINE */
 
-/* RGB565 (little-endian) → UYVY conversion for H.264 HW encoder */
+/*
+ * RGB565 → O_UYY_E_VYY conversion for H.264 HW encoder.
+ *
+ * O_UYY_E_VYY format (ESP32-P4 HW encoder native format):
+ *   Odd rows:  U Y Y U Y Y ...  (3 bytes per 2 pixels)
+ *   Even rows: V Y Y V Y Y ...  (3 bytes per 2 pixels)
+ * Total: 3 bytes per 2 pixels = 1.5 bytes/pixel
+ */
 #if HAS_HW_H264
-static void rgb565_to_uyvy(const uint8_t *rgb565, uint8_t *uyvy, int width, int height)
+static inline uint8_t clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+static void rgb565_to_ouyy_evyy(const uint8_t *rgb565, uint8_t *dst, int width, int height)
 {
     const uint16_t *src = (const uint16_t *)rgb565;
-    int total_pixels = width * height;
 
-    for (int i = 0; i < total_pixels; i += 2) {
-        /* Pixel 0 */
-        uint16_t p0 = src[i];
-        int r0 = (p0 >> 11) & 0x1F;
-        int g0 = (p0 >> 5) & 0x3F;
-        int b0 = p0 & 0x1F;
-        r0 = (r0 << 3) | (r0 >> 2);  /* 5-bit to 8-bit */
-        g0 = (g0 << 2) | (g0 >> 4);  /* 6-bit to 8-bit */
-        b0 = (b0 << 3) | (b0 >> 2);  /* 5-bit to 8-bit */
+    for (int y = 0; y < height; y++) {
+        const uint16_t *row = src + y * width;
+        /* Each row: 3 bytes per 2 pixels */
+        uint8_t *out = dst + y * (width / 2) * 3;
+        bool odd_row = (y & 1);
 
-        /* Pixel 1 */
-        uint16_t p1 = src[i + 1];
-        int r1 = (p1 >> 11) & 0x1F;
-        int g1 = (p1 >> 5) & 0x3F;
-        int b1 = p1 & 0x1F;
-        r1 = (r1 << 3) | (r1 >> 2);
-        g1 = (g1 << 2) | (g1 >> 4);
-        b1 = (b1 << 3) | (b1 >> 2);
+        for (int x = 0; x < width; x += 2) {
+            uint16_t p0 = row[x];
+            uint16_t p1 = row[x + 1];
 
-        /* Y = 0.299R + 0.587G + 0.114B (fixed-point) */
-        int y0 = (( 66 * r0 + 129 * g0 +  25 * b0 + 128) >> 8) + 16;
-        int y1 = (( 66 * r1 + 129 * g1 +  25 * b1 + 128) >> 8) + 16;
+            /* RGB565 → 8-bit RGB */
+            int r0 = ((p0 >> 11) & 0x1F) * 255 / 31;
+            int g0 = ((p0 >> 5) & 0x3F) * 255 / 63;
+            int b0 = (p0 & 0x1F) * 255 / 31;
+            int r1 = ((p1 >> 11) & 0x1F) * 255 / 31;
+            int g1 = ((p1 >> 5) & 0x3F) * 255 / 63;
+            int b1 = (p1 & 0x1F) * 255 / 31;
 
-        /* U, V from average of pixel pair */
-        int ra = (r0 + r1) >> 1;
-        int ga = (g0 + g1) >> 1;
-        int ba = (b0 + b1) >> 1;
-        int u = ((-38 * ra -  74 * ga + 112 * ba + 128) >> 8) + 128;
-        int v = ((112 * ra -  94 * ga -  18 * ba + 128) >> 8) + 128;
+            /* Y for each pixel */
+            int y0 = (( 66 * r0 + 129 * g0 +  25 * b0 + 128) >> 8) + 16;
+            int y1 = (( 66 * r1 + 129 * g1 +  25 * b1 + 128) >> 8) + 16;
 
-        /* UYVY packing: U Y0 V Y1 */
-        int out_idx = i * 2;
-        uyvy[out_idx + 0] = (uint8_t)(u < 0 ? 0 : (u > 255 ? 255 : u));
-        uyvy[out_idx + 1] = (uint8_t)(y0 < 0 ? 0 : (y0 > 255 ? 255 : y0));
-        uyvy[out_idx + 2] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
-        uyvy[out_idx + 3] = (uint8_t)(y1 < 0 ? 0 : (y1 > 255 ? 255 : y1));
+            /* Chroma from average of pixel pair */
+            int ra = (r0 + r1) >> 1;
+            int ga = (g0 + g1) >> 1;
+            int ba = (b0 + b1) >> 1;
+
+            if (odd_row) {
+                /* Odd row: U Y Y */
+                int u = ((-38 * ra - 74 * ga + 112 * ba + 128) >> 8) + 128;
+                *out++ = clamp8(u);
+            } else {
+                /* Even row: V Y Y */
+                int v = ((112 * ra - 94 * ga - 18 * ba + 128) >> 8) + 128;
+                *out++ = clamp8(v);
+            }
+            *out++ = clamp8(y0);
+            *out++ = clamp8(y1);
+        }
     }
 }
 #endif
@@ -386,17 +397,19 @@ esp_err_t camera_h264_init(void)
         }
     }
 
-    /* UYVY conversion buffer (same size as raw RGB565: 2 bytes/pixel) */
-    s_cam.uyvy_buf = heap_caps_malloc(s_cam.raw_buf_size, MALLOC_CAP_SPIRAM);
+    /* O_UYY_E_VYY conversion buffer: 1.5 bytes/pixel */
+    size_t yuv_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
+    yuv_buf_size = (yuv_buf_size + 63) & ~63;  /* Cache line align */
+    s_cam.uyvy_buf = heap_caps_aligned_calloc(64, 1, yuv_buf_size, MALLOC_CAP_SPIRAM);
     if (!s_cam.uyvy_buf) {
-        ESP_LOGE(TAG, "Failed to allocate UYVY conversion buffer");
+        ESP_LOGE(TAG, "Failed to allocate YUV conversion buffer");
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Buffers allocated: %d x (raw=%uKB + jpeg=%uKB + h264=%uKB) + uyvy=%uKB",
+    ESP_LOGI(TAG, "Buffers allocated: %d x (raw=%uKB + jpeg=%uKB + h264=%uKB) + yuv=%uKB",
              NUM_BUFS, (unsigned)(s_cam.raw_buf_size/1024),
              (unsigned)(JPEG_BUF_SIZE/1024), (unsigned)(H264_BUF_SIZE/1024),
-             (unsigned)(s_cam.raw_buf_size/1024));
+             (unsigned)(yuv_buf_size/1024));
 
 #if HAS_CAMERA_PIPELINE
     /* LDO for MIPI PHY */
@@ -499,7 +512,7 @@ esp_err_t camera_h264_init(void)
             .qp_min = H264_QP_MIN,
             .qp_max = H264_QP_MAX,
         },
-        .pic_type = ESP_H264_RAW_FMT_UYVY,
+        .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
     };
     esp_h264_err_t h264_ret = esp_h264_enc_hw_new(&h264_cfg, &s_cam.h264_handle);
     if (h264_ret == ESP_H264_ERR_OK) {
@@ -593,14 +606,14 @@ static void camera_capture_task(void *arg)
         /* === H.264 encode (for /h264 stream) === */
 #if HAS_HW_H264
         if (s_cam.h264_handle) {
-            /* Convert RGB565 → UYVY (HW encoder doesn't accept RGB565) */
-            rgb565_to_uyvy(frame_data, s_cam.uyvy_buf, CAM_WIDTH, CAM_HEIGHT);
+            /* Convert RGB565 → O_UYY_E_VYY (HW encoder native format) */
+            rgb565_to_ouyy_evyy(frame_data, s_cam.uyvy_buf, CAM_WIDTH, CAM_HEIGHT);
 
             int wr_idx = s_cam.h264_write_idx;
             esp_h264_enc_in_frame_t in_frame = {
                 .raw_data = { .buffer = s_cam.uyvy_buf },
             };
-            in_frame.raw_data.len = s_cam.raw_buf_size;
+            in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
 
             esp_h264_enc_out_frame_t out_frame = {
                 .raw_data = {
