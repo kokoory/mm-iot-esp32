@@ -63,8 +63,12 @@ static const char *TAG = "camera_h264";
 #define CSI_LANE_BITRATE_MBPS  200
 
 /* JPEG quality (1-100, higher = better quality, larger file) */
-#define JPEG_QUALITY        80
-#define JPEG_BUF_SIZE       (200 * 1024)  /* 200KB should be enough for 800x640 */
+#define JPEG_QUALITY        30           /* Low quality for HaLow bandwidth */
+#define JPEG_BUF_SIZE       (100 * 1024) /* 100KB for low-quality 800x640 */
+
+/* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
+#define STREAM_TARGET_FPS   5            /* Max fps sent to HTTP client */
+#define STREAM_FRAME_SKIP   (50 / STREAM_TARGET_FPS)  /* Skip N frames between sends */
 
 /* Double buffer for raw frames and JPEG output */
 #define NUM_BUFS            2
@@ -469,6 +473,8 @@ static void camera_capture_task(void *arg)
     ESP_LOGI(TAG, "Capture task started");
 
 #if HAS_CAMERA_PIPELINE
+    uint32_t skip_count = 0;
+
     while (1) {
         /*
          * Wait for the CSI ISR to signal that a frame has been captured.
@@ -480,6 +486,13 @@ static void camera_capture_task(void *arg)
             ESP_LOGW(TAG, "Frame capture timeout - check camera ribbon cable");
             continue;
         }
+
+        /* Skip frames to limit stream rate for HaLow bandwidth */
+        skip_count++;
+        if (skip_count < STREAM_FRAME_SKIP) {
+            continue;
+        }
+        skip_count = 0;
 
         int buf_idx = s_cam.captured_buf_idx;
         uint8_t *frame_data = s_cam.raw_buf[buf_idx];
@@ -522,7 +535,7 @@ static void camera_capture_task(void *arg)
         xSemaphoreGive(s_cam.frame_ready);
 #endif /* HAS_HW_JPEG */
 
-        /* Update FPS stats */
+        /* Update FPS stats (counts only encoded frames, not skipped) */
         s_cam.frame_count++;
         int64_t now = esp_timer_get_time();
         int64_t elapsed = now - s_cam.stats_start_time;
