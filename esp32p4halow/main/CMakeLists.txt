@@ -7,5 +7,5 @@ idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
                  "${CMAKE_CURRENT_SOURCE_DIR}/mavlink"
-    PRIV_REQUIRES morselib mm_shims nvs_flash
+    PRIV_REQUIRES driver morselib mm_shims mmipal lwip esp_timer esp_http_server mmregdb nvs_flash
 )

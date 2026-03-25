@@ -72,7 +72,7 @@ static void print_banner(void)
     ESP_LOGI(TAG, " PX4-inspired | 120 deg CCPM | Tail ESC");
     ESP_LOGI(TAG, "====================================");
     ESP_LOGI(TAG, "Core 0: Flight Controller Tasks");
-    ESP_LOGI(TAG, "Core 1: HaLow Communication (separate project)");
+    ESP_LOGI(TAG, "Core 1: HaLow + Camera + MAVLink GCS Bridge");
     ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
 }
 

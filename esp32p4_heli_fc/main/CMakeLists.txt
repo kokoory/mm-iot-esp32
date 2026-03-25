@@ -30,5 +30,5 @@ idf_component_register(
     SRCS ${ALL_SRCS}
     INCLUDE_DIRS ${INCLUDE_DIRS}
     PRIV_REQUIRES driver spi_master i2c uart mcpwm esp_adc esp_timer nvs_flash
-                  morselib mm_shims
+                  morselib mm_shims mmipal lwip esp_http_server mmregdb
 )
