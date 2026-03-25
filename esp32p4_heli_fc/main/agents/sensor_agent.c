@@ -55,6 +55,22 @@ static alt_estimator_t  s_alt_est;
 static float s_mag_data[3] = {0};
 static bool  s_mag_valid = false;
 
+/* ── Sensor validation thresholds ──────────────────────────── */
+#define IMU_ACCEL_MAX     160.0f   /* m/s^2 (~16g), reject spikes above this */
+#define IMU_GYRO_MAX      34.9f    /* rad/s (~2000 deg/s), reject spikes */
+#define BARO_ALT_MAX_CHANGE 50.0f  /* m, max plausible altitude change between readings */
+
+/* Previous baro for outlier detection */
+static float s_prev_baro_alt = 0.0f;
+static bool  s_prev_baro_valid = false;
+
+/* IMU low-pass filter state for vibration rejection */
+static float s_accel_filt[3] = {0};
+static float s_gyro_filt[3] = {0};
+static bool  s_imu_filt_initialized = false;
+#define IMU_ACCEL_FILTER_ALPHA 0.8f  /* higher = more raw data, lower = more smoothing */
+#define IMU_GYRO_FILTER_ALPHA  0.9f
+
 /* ------------------------------------------------------------------ */
 static int init_spi_bus(void)
 {

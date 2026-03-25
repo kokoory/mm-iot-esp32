@@ -30,7 +30,7 @@
 #include "agents/flight_ctrl_agent.h"
 #include "agents/actuator_agent.h"
 #include "agents/sysmon_agent.h"
-#include "halow_comm.h"
+#include "comm/halow_comm.h"
 
 static const char *TAG = "HELI_FC";
 

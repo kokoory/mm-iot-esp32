@@ -121,6 +121,32 @@ void mavlink_msg_rc_channels_encode(mavlink_message_t *msg,
                                     uint16_t *channels, uint8_t num_channels,
                                     uint8_t rssi);
 
+/* ── Param Value (ID 22) ─────────────────────────────────────── */
+
+void mavlink_msg_param_value_encode(mavlink_message_t *msg,
+                                    const char *param_id,
+                                    float param_value,
+                                    uint8_t param_type,
+                                    uint16_t param_count,
+                                    uint16_t param_index);
+
+/* ── Param Set (ID 23) - decode ──────────────────────────────── */
+
+void mavlink_msg_param_set_decode(const mavlink_message_t *msg,
+                                  char *param_id,
+                                  float *param_value,
+                                  uint8_t *param_type,
+                                  uint8_t *target_system,
+                                  uint8_t *target_component);
+
+/* ── Param Request Read (ID 20) - decode ─────────────────────── */
+
+void mavlink_msg_param_request_read_decode(const mavlink_message_t *msg,
+                                           char *param_id,
+                                           int16_t *param_index,
+                                           uint8_t *target_system,
+                                           uint8_t *target_component);
+
 /* ── Command Long (ID 76) - decode ───────────────────────────── */
 
 void mavlink_msg_command_long_decode(const mavlink_message_t *msg,

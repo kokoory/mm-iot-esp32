@@ -19,7 +19,7 @@
 #include "gcs_bridge.h"
 #include "mavlink/mavlink_types.h"
 #include "mavlink/mavlink_msg.h"
-#include "rpc/rpc_messages.h"
+#include "../rpc/rpc_messages.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -42,6 +42,11 @@ static rpc_telemetry_msg_t s_latest_altitude;
 static rpc_telemetry_msg_t s_latest_battery;
 static rpc_telemetry_msg_t s_latest_status;
 static rpc_telemetry_msg_t s_latest_rc;
+
+/* Param value queue (RPC_MSG_PARAM_VALUE from Core 0) */
+#define PARAM_VALUE_QUEUE_DEPTH 16
+static rpc_telemetry_msg_t s_param_value_queue[PARAM_VALUE_QUEUE_DEPTH];
+static int s_param_value_count = 0;
 
 static bool s_has_attitude  = false;
 static bool s_has_gps       = false;
@@ -122,6 +127,11 @@ static void drain_rpc_telemetry(void)
         case RPC_MSG_RC_CHANNELS:
             s_latest_rc = telem;
             s_has_rc = true;
+            break;
+        case RPC_MSG_PARAM_VALUE:
+            if (s_param_value_count < PARAM_VALUE_QUEUE_DEPTH) {
+                s_param_value_queue[s_param_value_count++] = telem;
+            }
             break;
         default:
             ESP_LOGW(TAG, "Unknown RPC telem type: 0x%02x", telem.msg_type);
@@ -275,6 +285,22 @@ static void send_vfr_hud(void)
     send_mavlink_msg(&msg);
 }
 
+static void send_param_values(void)
+{
+    for (int i = 0; i < s_param_value_count; i++) {
+        const rpc_telemetry_msg_t *pv = &s_param_value_queue[i];
+        mavlink_message_t msg;
+        mavlink_msg_param_value_encode(&msg,
+            pv->data.param_value.name,
+            pv->data.param_value.value,
+            pv->data.param_value.type,
+            pv->data.param_value.count,
+            pv->data.param_value.index);
+        send_mavlink_msg(&msg);
+    }
+    s_param_value_count = 0;
+}
+
 static void send_telemetry(void)
 {
     send_heartbeat();
@@ -282,6 +308,7 @@ static void send_telemetry(void)
     send_gps();
     send_battery();
     send_vfr_hud();
+    send_param_values();
 }
 
 /* ── Process incoming MAVLink commands from GCS ───────────────── */
@@ -351,6 +378,73 @@ static void handle_heartbeat_from_gcs(const mavlink_message_t *msg)
     (void)msg;
 }
 
+static void handle_param_request_read(const mavlink_message_t *msg)
+{
+    char param_id[17] = {0};
+    int16_t param_index;
+    uint8_t target_system, target_component;
+
+    mavlink_msg_param_request_read_decode(msg, param_id, &param_index,
+                                          &target_system, &target_component);
+
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    rpc_command_msg_t rpc_cmd;
+    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
+    rpc_cmd.msg_type = RPC_CMD_PARAM_REQUEST_READ;
+    rpc_cmd.timestamp_ms = get_time_ms();
+    memcpy(rpc_cmd.data.param_request.name, param_id, 16);
+    rpc_cmd.data.param_request.index = param_index;
+
+    if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
+        ESP_LOGW(TAG, "Failed to send PARAM_REQUEST_READ to Core 0");
+    }
+    ESP_LOGI(TAG, "PARAM_REQUEST_READ: name='%s' index=%d", param_id, param_index);
+}
+
+static void handle_param_request_list(const mavlink_message_t *msg)
+{
+    /* PARAM_REQUEST_LIST (ID 21): target_system(1) + target_component(1) = 2 bytes */
+    uint8_t target_system = msg->payload[0];
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    rpc_command_msg_t rpc_cmd;
+    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
+    rpc_cmd.msg_type = RPC_CMD_PARAM_REQUEST_LIST;
+    rpc_cmd.timestamp_ms = get_time_ms();
+    rpc_cmd.data.param_request.index = -1; /* -1 means "all" */
+
+    if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
+        ESP_LOGW(TAG, "Failed to send PARAM_REQUEST_LIST to Core 0");
+    }
+    ESP_LOGI(TAG, "PARAM_REQUEST_LIST received");
+}
+
+static void handle_param_set(const mavlink_message_t *msg)
+{
+    char param_id[17] = {0};
+    float param_value;
+    uint8_t param_type, target_system, target_component;
+
+    mavlink_msg_param_set_decode(msg, param_id, &param_value, &param_type,
+                                 &target_system, &target_component);
+
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    rpc_command_msg_t rpc_cmd;
+    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
+    rpc_cmd.msg_type = RPC_CMD_PARAM_SET;
+    rpc_cmd.timestamp_ms = get_time_ms();
+    memcpy(rpc_cmd.data.param_set.name, param_id, 16);
+    rpc_cmd.data.param_set.value = param_value;
+
+    ESP_LOGI(TAG, "PARAM_SET: %s = %.4f", param_id, param_value);
+
+    if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
+        ESP_LOGW(TAG, "Failed to send PARAM_SET to Core 0");
+    }
+}
+
 static void process_mavlink_message(const mavlink_message_t *msg)
 {
     /* Ignore messages from ourselves */
@@ -364,6 +458,15 @@ static void process_mavlink_message(const mavlink_message_t *msg)
         break;
     case MAVLINK_MSG_ID_COMMAND_LONG:
         handle_command_long(msg);
+        break;
+    case MAVLINK_MSG_ID_PARAM_REQUEST_READ:
+        handle_param_request_read(msg);
+        break;
+    case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:
+        handle_param_request_list(msg);
+        break;
+    case MAVLINK_MSG_ID_PARAM_SET:
+        handle_param_set(msg);
         break;
     default:
         ESP_LOGD(TAG, "Unhandled MAVLink msg ID: %lu from sys=%d comp=%d",
