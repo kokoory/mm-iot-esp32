@@ -228,8 +228,8 @@ static void flight_ctrl_task(void *param)
         case FLIGHT_MODE_ACRO: {
             /* RC sticks map directly to rate setpoints */
             float rate_sp[3];
-            rate_sp[0] = rc_roll  * DEG_TO_RAD(param_get(PARAM_MAX_YAW_RATE_DEG));
-            rate_sp[1] = rc_pitch * DEG_TO_RAD(param_get(PARAM_MAX_YAW_RATE_DEG));
+            rate_sp[0] = rc_roll  * DEG_TO_RAD(param_get(PARAM_MAX_ROLL_RATE_DEG));
+            rate_sp[1] = rc_pitch * DEG_TO_RAD(param_get(PARAM_MAX_PITCH_RATE_DEG));
             rate_sp[2] = rc_yaw   * DEG_TO_RAD(param_get(PARAM_MAX_YAW_RATE_DEG));
 
             float rate_meas[3] = {att.rollspeed, att.pitchspeed, att.yawspeed};

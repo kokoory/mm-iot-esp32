@@ -20,6 +20,7 @@ void pid_init(pid_controller_t *pid, float kp, float ki, float kd, float dt)
     pid->output_min = -1.0f;
     pid->output_max = 1.0f;
     pid->integral_max = 1.0f;
+    pid->ff = 0.0f;
 }
 
 void pid_set_limits(pid_controller_t *pid, float min, float max)
@@ -33,12 +34,20 @@ void pid_set_integral_limit(pid_controller_t *pid, float limit)
     pid->integral_max = (limit > 0.0f) ? limit : -limit;
 }
 
+void pid_set_feedforward(pid_controller_t *pid, float ff)
+{
+    pid->ff = ff;
+}
+
 float pid_update(pid_controller_t *pid, float setpoint, float measurement)
 {
     float error = setpoint - measurement;
 
     /* Proportional term */
     float p_term = pid->kp * error;
+
+    /* Feedforward term */
+    float ff_term = pid->ff * setpoint;
 
     /* Integral term with anti-windup clamping */
     pid->integral += error * pid->dt;
@@ -60,7 +69,7 @@ float pid_update(pid_controller_t *pid, float setpoint, float measurement)
     pid->has_prev_measurement = true;
 
     /* Sum and clamp output */
-    float output = p_term + i_term + d_term;
+    float output = p_term + i_term + d_term + ff_term;
 
     /* Anti-windup: if output is saturated, stop integrating in that direction */
     if (output > pid->output_max) {

@@ -51,6 +51,8 @@ typedef enum {
     PARAM_MAX_ROLL_DEG,
     PARAM_MAX_PITCH_DEG,
     PARAM_MAX_YAW_RATE_DEG,
+    PARAM_MAX_ROLL_RATE_DEG,    /* ACRO mode max roll rate (deg/s) */
+    PARAM_MAX_PITCH_RATE_DEG,   /* ACRO mode max pitch rate (deg/s) */
 
     /* AHRS / estimator */
     PARAM_AHRS_BETA,

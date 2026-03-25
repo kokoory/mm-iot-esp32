@@ -17,6 +17,7 @@ typedef struct {
     float output_min, output_max;
     float integral_max;
     float dt;
+    float ff;                   /* feedforward gain */
 } pid_controller_t;
 
 /**
@@ -34,6 +35,11 @@ void pid_set_limits(pid_controller_t *pid, float min, float max);
  * Set maximum absolute value of integral accumulator (anti-windup).
  */
 void pid_set_integral_limit(pid_controller_t *pid, float limit);
+
+/**
+ * Set feedforward gain. Applied to setpoint: output += ff * setpoint.
+ */
+void pid_set_feedforward(pid_controller_t *pid, float ff);
 
 /**
  * Compute one PID update step.

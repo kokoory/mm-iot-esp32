@@ -13,6 +13,7 @@
 #include "sensor_agent.h"
 
 #include <string.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -193,6 +194,12 @@ static void sensor_task(void *param)
     uint32_t cycle = 0;
     uint64_t prev_us = (uint64_t)esp_timer_get_time();
 
+    /* Sensor health counters for diagnostics */
+    uint32_t imu_read_errors = 0;
+    uint32_t imu_spike_rejects = 0;
+    uint32_t baro_read_errors = 0;
+    uint32_t baro_outlier_rejects = 0;
+
     while (1) {
         uint64_t now_us = (uint64_t)esp_timer_get_time();
         float dt = (float)(now_us - prev_us) * 1.0e-6f;
@@ -205,6 +212,34 @@ static void sensor_task(void *param)
             float accel[3], gyro[3], temp;
 
             if (ism330dhc_read(&s_imu, accel, gyro, &temp) == 0) {
+                /* --- Spike rejection: reject readings outside physical limits --- */
+                float accel_mag = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
+                float gyro_mag = sqrtf(gyro[0]*gyro[0] + gyro[1]*gyro[1] + gyro[2]*gyro[2]);
+
+                if (accel_mag > IMU_ACCEL_MAX || gyro_mag > IMU_GYRO_MAX) {
+                    imu_spike_rejects++;
+                    if ((imu_spike_rejects % 100) == 1) {
+                        ESP_LOGW(TAG, "IMU spike rejected (count=%lu): accel=%.1f gyro=%.1f",
+                                 (unsigned long)imu_spike_rejects, accel_mag, gyro_mag);
+                    }
+                    goto imu_done;  /* skip this sample, keep using previous filtered values */
+                }
+
+                /* --- Low-pass filter for vibration rejection --- */
+                if (!s_imu_filt_initialized) {
+                    for (int i = 0; i < 3; i++) {
+                        s_accel_filt[i] = accel[i];
+                        s_gyro_filt[i] = gyro[i];
+                    }
+                    s_imu_filt_initialized = true;
+                } else {
+                    for (int i = 0; i < 3; i++) {
+                        s_accel_filt[i] += IMU_ACCEL_FILTER_ALPHA * (accel[i] - s_accel_filt[i]);
+                        s_gyro_filt[i]  += IMU_GYRO_FILTER_ALPHA  * (gyro[i]  - s_gyro_filt[i]);
+                    }
+                }
+
+                /* Use filtered values for estimators, raw for publishing */
                 imu_msg.timestamp_us = now_us;
                 imu_msg.accel_x = accel[0];
                 imu_msg.accel_y = accel[1];
@@ -215,9 +250,9 @@ static void sensor_task(void *param)
                 imu_msg.temperature = temp;
                 orb_publish(ORB_ID_SENSOR_IMU, &imu_msg);
 
-                /* ---- AHRS update ---- */
-                float gyro_arr[3] = {gyro[0], gyro[1], gyro[2]};
-                float accel_arr[3] = {accel[0], accel[1], accel[2]};
+                /* ---- AHRS update (uses filtered data) ---- */
+                float gyro_arr[3] = {s_gyro_filt[0], s_gyro_filt[1], s_gyro_filt[2]};
+                float accel_arr[3] = {s_accel_filt[0], s_accel_filt[1], s_accel_filt[2]};
 
                 if (s_mag_valid) {
                     ahrs_update(&s_ahrs, gyro_arr, accel_arr, s_mag_data, dt);
@@ -225,34 +260,34 @@ static void sensor_task(void *param)
                     ahrs_update_imu(&s_ahrs, gyro_arr, accel_arr, dt);
                 }
 
-                /* Publish attitude */
+                /* Publish attitude (use bias-corrected filtered gyro for rate feedback) */
+                float gyro_bias[3];
+                ahrs_get_gyro_bias(&s_ahrs, gyro_bias);
+
                 vehicle_attitude_t att_msg;
                 att_msg.timestamp_us = now_us;
                 ahrs_get_quaternion(&s_ahrs, att_msg.q);
                 ahrs_get_euler(&s_ahrs, &att_msg.roll, &att_msg.pitch, &att_msg.yaw);
-                att_msg.rollspeed  = gyro[0];
-                att_msg.pitchspeed = gyro[1];
-                att_msg.yawspeed   = gyro[2];
+                att_msg.rollspeed  = s_gyro_filt[0] - gyro_bias[0];
+                att_msg.pitchspeed = s_gyro_filt[1] - gyro_bias[1];
+                att_msg.yawspeed   = s_gyro_filt[2] - gyro_bias[2];
                 orb_publish(ORB_ID_VEHICLE_ATTITUDE, &att_msg);
 
                 /* ---- Altitude estimator: accel update ---- */
-                /* Convert body-frame accel to world-frame Z using quaternion */
                 float q0 = s_ahrs.q0, q1 = s_ahrs.q1;
                 float q2 = s_ahrs.q2, q3 = s_ahrs.q3;
 
-                /* Rotate accel vector to world frame, extract Z component */
-                /* R(2,:) * accel = world Z acceleration */
-                float az_world = 2.0f * (q1 * q3 - q0 * q2) * accel[0] +
-                                 2.0f * (q2 * q3 + q0 * q1) * accel[1] +
-                                 (q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3) * accel[2];
+                float az_world = 2.0f * (q1 * q3 - q0 * q2) * s_accel_filt[0] +
+                                 2.0f * (q2 * q3 + q0 * q1) * s_accel_filt[1] +
+                                 (q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3) * s_accel_filt[2];
 
-                /* Remove gravity (NED: gravity is +9.81 in Z-down).
-                 * For positive-up altitude, invert and remove gravity. */
                 float accel_z_up = -(az_world - 9.80665f);
-
                 alt_estimator_update_accel(&s_alt_est, accel_z_up, dt);
+            } else {
+                imu_read_errors++;
             }
         }
+imu_done:
 
         /* ---- Barometer: every 10th cycle (100 Hz) ---- */
         if (baro_ok && (cycle % 10) == 0) {
@@ -260,15 +295,35 @@ static void sensor_task(void *param)
             if (bmp390_read(&s_baro, &pressure, &baro_temp) == 0) {
                 float alt_msl = bmp390_calc_altitude(pressure);
 
-                sensor_baro_t baro_msg;
-                baro_msg.timestamp_us = now_us;
-                baro_msg.pressure_pa = pressure;
-                baro_msg.temperature = baro_temp;
-                baro_msg.altitude_msl = alt_msl;
-                orb_publish(ORB_ID_SENSOR_BARO, &baro_msg);
+                /* --- Baro outlier rejection --- */
+                bool baro_valid = true;
+                if (s_prev_baro_valid) {
+                    float delta = fabsf(alt_msl - s_prev_baro_alt);
+                    if (delta > BARO_ALT_MAX_CHANGE) {
+                        baro_outlier_rejects++;
+                        baro_valid = false;
+                        if ((baro_outlier_rejects % 10) == 1) {
+                            ESP_LOGW(TAG, "Baro outlier rejected (count=%lu): delta=%.1fm",
+                                     (unsigned long)baro_outlier_rejects, delta);
+                        }
+                    }
+                }
 
-                /* Update altitude estimator with barometer */
-                alt_estimator_update_baro(&s_alt_est, alt_msl, now_us);
+                if (baro_valid) {
+                    s_prev_baro_alt = alt_msl;
+                    s_prev_baro_valid = true;
+
+                    sensor_baro_t baro_msg;
+                    baro_msg.timestamp_us = now_us;
+                    baro_msg.pressure_pa = pressure;
+                    baro_msg.temperature = baro_temp;
+                    baro_msg.altitude_msl = alt_msl;
+                    orb_publish(ORB_ID_SENSOR_BARO, &baro_msg);
+
+                    alt_estimator_update_baro(&s_alt_est, alt_msl, now_us);
+                }
+            } else {
+                baro_read_errors++;
             }
         }
 
@@ -276,17 +331,21 @@ static void sensor_task(void *param)
         if (mag_ok && (cycle % 10) == 5) {
             float mag[3];
             if (lis3mdl_read(&s_mag, mag) == 0) {
-                s_mag_data[0] = mag[0];
-                s_mag_data[1] = mag[1];
-                s_mag_data[2] = mag[2];
-                s_mag_valid = true;
+                /* Reject obviously bad mag readings (>10 gauss ~= noise/interference) */
+                float mag_mag = sqrtf(mag[0]*mag[0] + mag[1]*mag[1] + mag[2]*mag[2]);
+                if (mag_mag > 0.01f && mag_mag < 10.0f) {
+                    s_mag_data[0] = mag[0];
+                    s_mag_data[1] = mag[1];
+                    s_mag_data[2] = mag[2];
+                    s_mag_valid = true;
 
-                sensor_mag_t mag_msg;
-                mag_msg.timestamp_us = now_us;
-                mag_msg.mag_x = mag[0];
-                mag_msg.mag_y = mag[1];
-                mag_msg.mag_z = mag[2];
-                orb_publish(ORB_ID_SENSOR_MAG, &mag_msg);
+                    sensor_mag_t mag_msg;
+                    mag_msg.timestamp_us = now_us;
+                    mag_msg.mag_x = mag[0];
+                    mag_msg.mag_y = mag[1];
+                    mag_msg.mag_z = mag[2];
+                    orb_publish(ORB_ID_SENSOR_MAG, &mag_msg);
+                }
             }
         }
 
@@ -314,6 +373,13 @@ static void sensor_task(void *param)
             pos_msg.z_valid = baro_ok;
             pos_msg.v_z_valid = baro_ok;
             orb_publish(ORB_ID_VEHICLE_LOCAL_POSITION, &pos_msg);
+        }
+
+        /* ---- Sensor health log: every 10 seconds (10000 cycles at 1kHz) ---- */
+        if ((cycle % 10000) == 0 && cycle > 0) {
+            ESP_LOGI(TAG, "Sensor health: IMU errs=%lu spikes=%lu, Baro errs=%lu outliers=%lu",
+                     (unsigned long)imu_read_errors, (unsigned long)imu_spike_rejects,
+                     (unsigned long)baro_read_errors, (unsigned long)baro_outlier_rejects);
         }
 
         cycle++;

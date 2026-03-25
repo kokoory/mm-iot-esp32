@@ -44,6 +44,8 @@ static const param_meta_t s_param_table[PARAM_COUNT] = {
     [PARAM_MAX_ROLL_DEG]      = { "MC_ROLL_LIM",     45.0f,  10.0f, 80.0f },
     [PARAM_MAX_PITCH_DEG]     = { "MC_PITCH_LIM",    45.0f,  10.0f, 80.0f },
     [PARAM_MAX_YAW_RATE_DEG]  = { "MC_YAWRATE_LIM",  180.0f, 30.0f, 360.0f },
+    [PARAM_MAX_ROLL_RATE_DEG] = { "MC_ACRO_R_MAX",   360.0f, 30.0f, 720.0f },
+    [PARAM_MAX_PITCH_RATE_DEG]= { "MC_ACRO_P_MAX",   360.0f, 30.0f, 720.0f },
 
     /* AHRS / estimator */
     [PARAM_AHRS_BETA]         = { "EKF2_BETA",       0.1f,   0.01f, 1.0f },
