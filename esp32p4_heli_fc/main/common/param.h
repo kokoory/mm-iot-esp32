@@ -73,8 +73,14 @@ typedef enum {
     PARAM_BATT_CRIT_V,
     PARAM_BATT_VDIV_RATIO,
 
+    /* RC input */
+    PARAM_RC_DEADZONE,          /* Stick deadzone for roll/pitch/yaw (0-1) */
+    PARAM_RC_ARM_THRESHOLD,     /* CH5 threshold: above = arm (normalized) */
+    PARAM_RC_COLL_ARM_MAX,      /* Max collective position to allow arming */
+
     /* System */
     PARAM_SENSOR_TIMEOUT_MS,
+    PARAM_GCS_TIMEOUT_MS,       /* GCS heartbeat loss timeout (ms) */
 
     PARAM_COUNT
 } param_id_t;

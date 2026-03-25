@@ -57,6 +57,16 @@ static const char *TAG = "flight_ctrl";
 #define POS_KP              0.5f    /* position error (m) -> attitude angle (rad) */
 #define POS_MAX_ANGLE       DEG_TO_RAD(15.0f)  /* max tilt for position control */
 
+/* ── Helper: apply deadzone to RC stick ──────────────────────── */
+
+static float apply_deadzone(float input, float dz)
+{
+    if (fabsf(input) < dz) return 0.0f;
+    /* Re-scale so output is 0..1 immediately outside deadzone */
+    float sign = (input > 0.0f) ? 1.0f : -1.0f;
+    return sign * (fabsf(input) - dz) / (1.0f - dz);
+}
+
 /* ── Helper: stabilized attitude control ─────────────────────── */
 
 static void compute_stabilized_controls(
@@ -210,11 +220,12 @@ static void flight_ctrl_task(void *param)
             continue;
         }
 
-        /* RC channel mapping */
-        float rc_roll  = rc.channels[0];
-        float rc_pitch = rc.channels[1];
+        /* RC channel mapping with deadzone */
+        float dz = param_get(PARAM_RC_DEADZONE);
+        float rc_roll  = apply_deadzone(rc.channels[0], dz);
+        float rc_pitch = apply_deadzone(rc.channels[1], dz);
         float rc_coll  = rc.channels[2] * 2.0f - 1.0f;
-        float rc_yaw   = rc.channels[3];
+        float rc_yaw   = apply_deadzone(rc.channels[3], dz);
 
         switch (status.flight_mode) {
         case FLIGHT_MODE_MANUAL:

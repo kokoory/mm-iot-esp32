@@ -66,8 +66,14 @@ static const param_meta_t s_param_table[PARAM_COUNT] = {
     [PARAM_BATT_CRIT_V]       = { "BAT_V_CRIT",      9.6f,   5.0f,  48.0f },
     [PARAM_BATT_VDIV_RATIO]   = { "BAT_V_DIV",       11.0f,  1.0f,  50.0f },
 
+    /* RC input */
+    [PARAM_RC_DEADZONE]       = { "RC_DZ",            0.05f,  0.0f,  0.3f },
+    [PARAM_RC_ARM_THRESHOLD]  = { "RC_ARM_TH",        0.5f,   0.1f,  0.9f },
+    [PARAM_RC_COLL_ARM_MAX]   = { "RC_COLL_ARM",     -0.8f,  -1.0f,  0.0f },
+
     /* System */
     [PARAM_SENSOR_TIMEOUT_MS] = { "SYS_SENS_TMO",    500.0f, 100.0f, 5000.0f },
+    [PARAM_GCS_TIMEOUT_MS]    = { "SYS_GCS_TMO",     5000.0f, 1000.0f, 30000.0f },
 };
 
 /* Runtime parameter values */

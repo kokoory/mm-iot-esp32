@@ -51,6 +51,10 @@ static const char *TAG = "sysmon_agent";
 /* RC timeout in microseconds (fixed, not a tunable param) */
 #define RC_TIMEOUT_US           1000000 /* 1 second */
 
+/* RC switch thresholds for mode mapping (3-position switch) */
+#define RC_SW_LOW_THRESHOLD     -0.3f   /* below = position 0 */
+#define RC_SW_HIGH_THRESHOLD     0.3f   /* above = position 2, between = position 1 */
+
 /* LED timing */
 #define LED_SLOW_BLINK_MS       500     /* 1 Hz blink: 500ms on, 500ms off */
 #define LED_FAST_BLINK_MS       100     /* 5 Hz blink */
@@ -206,6 +210,15 @@ static void sysmon_task(void *param)
     uint64_t last_mag_ts  = 0;
     uint64_t last_gps_ts  = 0;
     uint64_t last_rc_ts   = 0;
+    uint64_t last_gcs_cmd_ts = 0; /* last RPC command from GCS */
+
+    /* Latest RC channel data for arm/mode switch */
+    rc_channels_t last_rc = {0};
+    bool rc_arm_prev = false;   /* previous arm switch state (for edge detect) */
+
+    /* Previous sensor health for transition detection */
+    bool prev_baro_ok = false;
+    bool prev_mag_ok  = false;
 
     /* LED state */
     uint32_t led_counter = 0;
@@ -276,6 +289,7 @@ static void sysmon_task(void *param)
             rc_channels_t rc;
             if (orb_copy(rc_sub, &rc) == 0) {
                 last_rc_ts = rc.timestamp_us;
+                last_rc = rc;
             }
         }
 
@@ -363,23 +377,136 @@ static void sysmon_task(void *param)
             default:
                 break;
             }
+
+            /* ---- 4b. Sensor degradation: mode fallback (independent of failsafe) ---- */
+            /* Baro lost while in altitude-dependent mode → fall back to STABILIZE */
+            if (prev_baro_ok && !baro_ok) {
+                if (flight_mode == FLIGHT_MODE_ALT_HOLD ||
+                    flight_mode == FLIGHT_MODE_LOITER) {
+                    ESP_LOGW(TAG, "Baro lost: %s -> STABILIZE",
+                             flight_mode == FLIGHT_MODE_ALT_HOLD ? "ALT_HOLD" : "LOITER");
+                    flight_mode = FLIGHT_MODE_STABILIZE;
+                    send_statustext_rpc(rpc, MAV_SEVERITY_WARNING,
+                                        "Baro lost - fallback STABILIZE");
+                }
+            }
+            /* Mag lost while armed → notify pilot (yaw hold degrades) */
+            if (prev_mag_ok && !mag_ok) {
+                ESP_LOGW(TAG, "Mag lost: heading hold degraded");
+                send_statustext_rpc(rpc, MAV_SEVERITY_WARNING,
+                                    "Mag lost - heading unreliable");
+            }
+            /* GPS lost in GPS-dependent modes → fall back to ALT_HOLD or STABILIZE */
+            if (!gps_ok && (flight_mode == FLIGHT_MODE_LOITER)) {
+                ESP_LOGW(TAG, "GPS lost in LOITER: -> %s",
+                         baro_ok ? "ALT_HOLD" : "STABILIZE");
+                flight_mode = baro_ok ? FLIGHT_MODE_ALT_HOLD : FLIGHT_MODE_STABILIZE;
+                send_statustext_rpc(rpc, MAV_SEVERITY_WARNING,
+                                    "GPS lost - mode fallback");
+            }
+        }
+        prev_baro_ok = baro_ok;
+        prev_mag_ok  = mag_ok;
+
+        /* ---- 4c. RC arm switch (CH5) and mode switch (CH4) ---- */
+        if (rc_ok && last_rc.channel_count >= 6) {
+            /* --- Arm switch: CH5 rising edge above threshold --- */
+            float arm_ch = last_rc.channels[5];
+            float arm_threshold = param_get(PARAM_RC_ARM_THRESHOLD);
+            bool rc_arm_now = (arm_ch > arm_threshold);
+
+            if (rc_arm_now && !rc_arm_prev && arm_state == ARM_STATE_DISARMED) {
+                /* Attempt arm via RC switch */
+                float rc_coll = last_rc.channels[2] * 2.0f - 1.0f; /* normalize like flight_ctrl */
+                float coll_arm_max = param_get(PARAM_RC_COLL_ARM_MAX);
+
+                if (!imu_ok) {
+                    ESP_LOGW(TAG, "RC ARM rejected: IMU not healthy");
+                    send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "ARM fail: no IMU");
+                } else if (failsafe != FAILSAFE_NONE && failsafe != FAILSAFE_BATTERY_LOW) {
+                    ESP_LOGW(TAG, "RC ARM rejected: failsafe active (%d)", failsafe);
+                    send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "ARM fail: failsafe");
+                } else if (rc_coll > coll_arm_max) {
+                    ESP_LOGW(TAG, "RC ARM rejected: collective too high (%.2f > %.2f)",
+                             rc_coll, coll_arm_max);
+                    send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "ARM fail: coll high");
+                } else {
+                    ESP_LOGI(TAG, "ARMED via RC switch");
+                    arm_state = ARM_STATE_ARMED;
+                    send_statustext_rpc(rpc, MAV_SEVERITY_INFO, "Vehicle armed (RC)");
+                }
+            } else if (!rc_arm_now && rc_arm_prev && arm_state == ARM_STATE_ARMED) {
+                /* Disarm via RC switch */
+                ESP_LOGI(TAG, "DISARMED via RC switch");
+                arm_state = ARM_STATE_DISARMED;
+                send_statustext_rpc(rpc, MAV_SEVERITY_INFO, "Vehicle disarmed (RC)");
+            }
+            rc_arm_prev = rc_arm_now;
+
+            /* --- Mode switch: CH4 (3-position) --- */
+            float mode_ch = last_rc.channels[4];
+            flight_mode_t rc_mode;
+            if (mode_ch < RC_SW_LOW_THRESHOLD) {
+                rc_mode = FLIGHT_MODE_STABILIZE;     /* position 0: STABILIZE */
+            } else if (mode_ch > RC_SW_HIGH_THRESHOLD) {
+                rc_mode = FLIGHT_MODE_ALT_HOLD;      /* position 2: ALT_HOLD */
+            } else {
+                rc_mode = FLIGHT_MODE_LOITER;        /* position 1: LOITER (requires GPS) */
+            }
+
+            /* Only apply RC mode if no failsafe is overriding */
+            if (failsafe == FAILSAFE_NONE || failsafe == FAILSAFE_BATTERY_LOW) {
+                if (rc_mode != flight_mode) {
+                    /* Validate GPS modes */
+                    if (rc_mode == FLIGHT_MODE_LOITER && !gps_ok) {
+                        /* Silently refuse GPS mode without GPS */
+                    } else {
+                        ESP_LOGI(TAG, "Flight mode %d -> %d via RC switch", flight_mode, rc_mode);
+                        flight_mode = rc_mode;
+                    }
+                }
+            }
+        }
+
+        /* ---- 6b. GCS link timeout detection ---- */
+        if (rpc != NULL && last_gcs_cmd_ts > 0) {
+            uint64_t gcs_timeout_us = (uint64_t)(param_get(PARAM_GCS_TIMEOUT_MS) * 1000.0f);
+            bool gcs_ok = (now_us - last_gcs_cmd_ts) < gcs_timeout_us;
+            if (!gcs_ok && failsafe != FAILSAFE_GCS_LOST &&
+                arm_state == ARM_STATE_ARMED) {
+                failsafe = FAILSAFE_GCS_LOST;
+                ESP_LOGW(TAG, "GCS link lost (%.1fs timeout)",
+                         param_get(PARAM_GCS_TIMEOUT_MS) / 1000.0f);
+                send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "GCS link lost");
+            }
         }
 
         /* ---- 7. Check RPC commands ---- */
         if (rpc != NULL) {
             rpc_command_msg_t cmd;
             while (rpc_receive_command(rpc, &cmd, 0) == 0) {
+                last_gcs_cmd_ts = now_us; /* track GCS heartbeat */
+
                 switch (cmd.msg_type) {
                 case RPC_CMD_ARM:
                     if (cmd.data.arm_cmd.arm) {
                         /* Safety checks for arming */
+                        float rc_coll = last_rc.channels[2] * 2.0f - 1.0f;
+                        float coll_arm_max = param_get(PARAM_RC_COLL_ARM_MAX);
+
                         if (!imu_ok) {
                             ESP_LOGW(TAG, "ARM rejected: IMU not healthy");
+                            send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "ARM fail: no IMU");
                         } else if (!rc_ok) {
                             ESP_LOGW(TAG, "ARM rejected: no RC signal");
+                            send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "ARM fail: no RC");
                         } else if (failsafe != FAILSAFE_NONE &&
                                    failsafe != FAILSAFE_BATTERY_LOW) {
                             ESP_LOGW(TAG, "ARM rejected: failsafe active (%d)", failsafe);
+                            send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "ARM fail: failsafe");
+                        } else if (rc_coll > coll_arm_max) {
+                            ESP_LOGW(TAG, "ARM rejected: collective too high (%.2f)", rc_coll);
+                            send_statustext_rpc(rpc, MAV_SEVERITY_WARNING, "ARM fail: coll high");
                         } else {
                             ESP_LOGI(TAG, "ARMED via RPC");
                             arm_state = ARM_STATE_ARMED;
