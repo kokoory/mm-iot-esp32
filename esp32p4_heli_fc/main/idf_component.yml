@@ -1,3 +1,4 @@
+idf: ">=5.3.0"
 dependencies:
   morselib:
     path: $MMIOT_ROOT/framework/morselib
