@@ -12,7 +12,7 @@ CONFIG_MM_SPI_MOSI=3
 CONFIG_MM_SPI_MISO=2
 CONFIG_MM_SPI_CS=4
 CONFIG_MM_SPI_IRQ=21
-CONFIG_MM_BCF_FILE="bcf_mf08651_us.mbin"
+CONFIG_MM_BCF_FILE="bcf_fgh100mhaamd.mbin"
 
 # MIPI-CSI camera (OV5647 / RPi Camera v1)
 # CSI uses dedicated MIPI differential pairs (not GPIO)
