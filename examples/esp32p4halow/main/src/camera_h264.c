@@ -66,10 +66,10 @@ static const char *TAG = "camera_h264";
 #define JPEG_BUF_SIZE       (100 * 1024) /* 100KB for low-quality 800x640 */
 
 /* H.264 encoder settings */
-#define H264_GOP            30           /* I-frame every 30 frames */
+#define H264_GOP            60           /* I-frame every 60 frames (~12s at 5fps) */
 #define H264_FPS            10           /* Encode at 10fps for HaLow */
 #define H264_QP_MIN         30
-#define H264_QP_MAX         40
+#define H264_QP_MAX         45           /* Aggressive compression to prevent bursts */
 #define H264_BITRATE        500000       /* 500 Kbps target for HaLow */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
@@ -427,6 +427,12 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
             payload += chunk;
             remaining -= chunk;
             first = false;
+
+            /* Pacing: 1ms delay between fragments to prevent lwIP queue overflow
+             * (I-frames can generate 50+ fragments that would otherwise burst) */
+            if (remaining > 0) {
+                vTaskDelay(1);
+            }
         }
     }
 }
@@ -802,7 +808,14 @@ static void camera_capture_task(void *arg)
 
             if (h264_ret == ESP_H264_ERR_OK && out_frame.length > 0) {
                 h264_size_out = out_frame.length;
-                /* Send immediately via UDP RTP (non-blocking) */
+                /* Log I-frame size (these cause bursts) */
+                if (out_frame.frame_type == ESP_H264_FRAME_TYPE_IDR ||
+                    out_frame.frame_type == ESP_H264_FRAME_TYPE_I) {
+                    ESP_LOGI(TAG, "I-Frame: %u bytes (%u packets)",
+                             (unsigned)out_frame.length,
+                             (unsigned)(out_frame.length / RTP_MTU + 1));
+                }
+                /* Send immediately via UDP RTP (non-blocking, with pacing) */
                 rtp_send_h264_frame(s_cam.h264_buf, out_frame.length);
             }
         }
