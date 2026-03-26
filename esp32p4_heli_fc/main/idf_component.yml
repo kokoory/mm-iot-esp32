@@ -5,3 +5,9 @@ dependencies:
     path: $MMIOT_ROOT/framework/mm_shims
   mmregdb:
     path: $MMIOT_ROOT/framework/src/mmregdb
+  mmipal:
+    path: $MMIOT_ROOT/framework/src/mmipal
+  mmutils:
+    path: $MMIOT_ROOT/framework/src/mmutils
+  espressif/esp_cam_sensor: "^0.5.1"
+  espressif/esp_h264: "^1.0.0"

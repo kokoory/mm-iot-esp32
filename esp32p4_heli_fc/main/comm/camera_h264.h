@@ -1,11 +1,13 @@
 /*
- * MIPI-CSI Camera + H.264 Encoder for ESP32-P4
+ * MIPI-CSI Camera + HW JPEG/H.264 Encoder for ESP32-P4
  *
- * Uses the ESP32-P4 hardware H.264 encoder to compress MIPI-CSI camera
- * frames and stream them over HTTP via Wi-Fi HaLow.
+ * Pipelines:
+ *   MJPEG: OV5647 → MIPI-CSI → ISP (RAW8→RGB565) → HW JPEG → HTTP /
+ *   H.264: OV5647 → MIPI-CSI → ISP (RAW8→RGB565) → HW H.264 → UDP RTP :5600
  *
- * SPDX-License-Identifier: Apache-2.0
+ * Hardware: Waveshare ESP32-P4-WIFI6 + OV5647 (RPi Camera v1)
  */
+
 #pragma once
 
 #include "esp_err.h"
@@ -16,22 +18,26 @@ extern "C" {
 #endif
 
 /**
- * Initialize the MIPI-CSI camera and H.264 encoder.
+ * Initialize the MIPI-CSI camera and encoder pipeline.
  *
- * Configures the ISP pipeline: MIPI-CSI -> ISP -> H.264 encoder.
- * The H.264 output is stored in a ring buffer for streaming.
+ * Configures: LDO → SCCB/I2C → OV5647 → CSI → ISP → JPEG + H.264 encoders.
+ * Also creates a UDP RTP socket for H.264 streaming (broadcast port 5600).
  *
  * @return ESP_OK on success, error code otherwise.
  */
 esp_err_t camera_h264_init(void);
 
 /**
- * Start the HTTP server for H.264 video streaming.
+ * Start the HTTP server and UDP RTP streaming.
  *
- * Endpoints:
- *   GET /         - MJPEG fallback stream
- *   GET /h264     - Raw H.264 NAL unit stream
- *   GET /status   - JSON status (fps, bitrate, resolution)
+ * HTTP endpoints:
+ *   GET /         - MJPEG stream (HW JPEG, for browser viewing)
+ *   GET /status   - JSON status (fps, resolution, encoder info)
+ *
+ * UDP RTP:
+ *   H.264 NALs broadcast to port 5600 (QGC/VLC)
+ *   VLC: rtp://@:5600  or use SDP file
+ *   QGC: Video Source = UDP h.264, port 5600
  *
  * @return HTTP server handle, or NULL on failure.
  */

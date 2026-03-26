@@ -1,13 +1,11 @@
 /*
- * Morse Micro HaLow WiFi Common Initialization
- *
- * Based on MM-IoT-SDK reference implementation.
- * Handles HaLow radio init, STA connection, and DHCP.
+ * Copyright 2023 Morse Micro
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <string.h>
+#include <stdbool.h>
 #include "mmosal.h"
 #include "mmhal.h"
 #include "mmwlan.h"
@@ -16,7 +14,7 @@
 #include "mm_app_loadconfig.h"
 
 #ifndef DNS_MAX_SERVERS
-#define DNS_MAX_SERVERS 2
+#define DNS_MAX_SERVERS                 2
 #endif
 
 static struct mmosal_semb *link_established = NULL;
@@ -28,7 +26,8 @@ uint8_t mac_addr[MMWLAN_MAC_ADDR_LEN];
 
 static void sta_status_callback(enum mmwlan_sta_state sta_state)
 {
-    switch (sta_state) {
+    switch (sta_state)
+    {
     case MMWLAN_STA_DISABLED:
         printf("WLAN STA disabled\n");
         break;
@@ -44,7 +43,8 @@ static void sta_status_callback(enum mmwlan_sta_state sta_state)
 static void link_status_callback(const struct mmipal_link_status *link_status)
 {
     uint32_t time_ms = mmosal_get_time_ms();
-    if (link_status->link_state == MMIPAL_LINK_UP) {
+    if (link_status->link_state == MMIPAL_LINK_UP)
+    {
         printf("Link is up. Time: %lu ms, ", time_ms);
         printf("IP: %s, ", link_status->ip_addr);
         printf("Netmask: %s, ", link_status->netmask);
@@ -57,7 +57,9 @@ static void link_status_callback(const struct mmipal_link_status *link_status)
 
         link_up = true;
         app_wlan_arp_send();
-    } else {
+    }
+    else
+    {
         printf("Link is down. Time: %lu ms\n", time_ms);
         link_up = false;
     }
@@ -82,7 +84,8 @@ void app_wlan_init(void)
     struct mmipal_init_args mmipal_init_args = MMIPAL_INIT_ARGS_DEFAULT;
     load_mmipal_init_args(&mmipal_init_args);
 
-    if (mmipal_init(&mmipal_init_args) != MMIPAL_SUCCESS) {
+    if (mmipal_init(&mmipal_init_args) != MMIPAL_SUCCESS)
+    {
         printf("Error initializing network interface.\n");
         MMOSAL_ASSERT(false);
     }
@@ -95,7 +98,8 @@ void app_wlan_init(void)
            version.morse_fw_version, version.morselib_version, version.morse_chip_id);
 
     status = mmwlan_get_mac_addr(mac_addr);
-    if (status != MMWLAN_SUCCESS) {
+    if (status != MMWLAN_SUCCESS)
+    {
         printf("Failed to get MAC address\n");
         MMOSAL_ASSERT(false);
     }
@@ -110,9 +114,8 @@ void app_wlan_start(void)
     load_mmwlan_settings();
 
     printf("Attempting to connect to %s ", sta_args.ssid);
-    if (sta_args.security_type == MMWLAN_SAE) {
+    if (sta_args.security_type == MMWLAN_SAE)
         printf("with passphrase %s", sta_args.passphrase);
-    }
     printf("\n");
     printf("This may take some time (~30 seconds)\n");
 
@@ -120,7 +123,8 @@ void app_wlan_start(void)
     MMOSAL_ASSERT(status == MMWLAN_SUCCESS);
 
     printf("Waiting for DHCP IP assignment...\n");
-    while (!mmosal_semb_wait(link_established, 10000)) {
+    while (!mmosal_semb_wait(link_established, 10000))
+    {
         printf("  Still waiting for DHCP... (%lu ms elapsed)\n", mmosal_get_time_ms());
     }
     printf("DHCP IP assigned successfully.\n");
@@ -138,7 +142,8 @@ bool app_wlan_is_connected(void)
 
 void app_wlan_arp_send(void)
 {
-    if (link_up) {
+    if (link_up)
+    {
         enum mmwlan_status status;
         uint8_t arp_packet[] = {
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -153,7 +158,8 @@ void app_wlan_arp_send(void)
             ((uint8_t *)&gw_addr_u32)[2], ((uint8_t *)&gw_addr_u32)[3],
         };
         status = mmwlan_tx(arp_packet, sizeof(arp_packet));
-        if (status != MMWLAN_SUCCESS) {
+        if (status != MMWLAN_SUCCESS)
+        {
             printf("TX failed with status %d\n", status);
         }
     }

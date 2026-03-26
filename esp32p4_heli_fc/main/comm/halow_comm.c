@@ -2,13 +2,13 @@
  * ESP32-P4 HaLow Communication Module (Core 1)
  *
  * Integrates three subsystems on Core 1:
- *   1. Wi-Fi HaLow (Wio-WM6180) - Long-range sub-GHz wireless link
+ *   1. Wi-Fi HaLow (MMECH06) - Long-range sub-GHz wireless link
  *   2. MIPI-CSI Camera + H.264  - Hardware-encoded video streaming
  *   3. MAVLink GCS Bridge        - Telemetry/command via RPC from Core 0
  *
  * Hardware:
- *   - Waveshare ESP32-P4-WIFI6 board
- *   - Wio-WM6180 Wi-Fi HaLow module (SPI)
+ *   - Waveshare ESP32-P4-Module-DEV-KIT board
+ *   - MMECH06 Wi-Fi HaLow module (SPI, BCF=bcf_mf08651_us.mbin)
  *   - MIPI-CSI camera (OV5647 / SC2336)
  *   - Flight controller running on Core 0 (same binary)
  *
@@ -38,6 +38,7 @@
 #include "esp_event.h"
 
 #include "mm_app_common.h"
+#include "mm_app_loadconfig.h"
 #include "camera_h264.h"
 #include "../rpc/rpc_core.h"
 #include "gcs_bridge.h"
