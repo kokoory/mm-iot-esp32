@@ -79,6 +79,10 @@ void app_wlan_init(void)
     /* BUSY pin workaround - disable power save */
     mmwlan_set_power_save_mode(MMWLAN_PS_DISABLED);
 
+    /* Fix MCS2 (QPSK 3/4), 2MHz BW, Long GI for long-range (~2km) drone operation */
+    status = mmwlan_ate_override_rate_control(MMWLAN_MCS_2, MMWLAN_BW_2MHZ, MMWLAN_GI_LONG);
+    printf("Rate control override: MCS2, BW=2MHz, GI=Long (status=%d)\n", status);
+
     mmwlan_set_channel_list(load_channel_list());
 
     struct mmipal_init_args mmipal_init_args = MMIPAL_INIT_ARGS_DEFAULT;

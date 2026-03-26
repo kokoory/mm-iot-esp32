@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Pipelines:
- *   MJPEG: OV5647 → MIPI-CSI → ISP (RAW8→RGB565) → HW JPEG → HTTP /
- *   H.264: OV5647 → MIPI-CSI → ISP (RAW8→RGB565) → HW H.264 → HTTP /h264
+ *   H.264: OV5647 → MIPI-CSI → ISP (RAW8→YUV420) → HW H.264 → UDP RTP :5600
+ *   MJPEG: (disabled by default, set ENABLE_MJPEG=1 to enable)
  *
  * References:
  *   - ESP-IDF examples/peripherals/camera/camera_dsi
@@ -82,7 +82,10 @@ static const char *TAG = "camera_h264";
 #define RTP_CLOCK_RATE      90000        /* 90kHz for video */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
-#define STREAM_TARGET_FPS   5
+#define STREAM_TARGET_FPS   10
+
+/* Set to 1 to enable MJPEG HTTP streaming (adds ~32ms latency per frame) */
+#define ENABLE_MJPEG        0
 
 /* Double buffer for raw frames and encoded output */
 #define NUM_BUFS            2
@@ -144,16 +147,13 @@ static struct {
     uint8_t *h264_buf;
     size_t h264_size;
 
-    /* YUV conversion buffer for H.264 (HW encoder doesn't accept RGB565) */
-    uint8_t *yuv_buf;
-
     /* UDP RTP socket for H.264 */
     int rtp_sock;
     struct sockaddr_in rtp_dest;
     uint16_t rtp_seq;
     uint32_t rtp_timestamp;
 
-    /* Raw frame double buffers (RGB565 from ISP) */
+    /* Raw frame double buffers (YUV420 from ISP) */
     uint8_t *raw_buf[NUM_BUFS];
     size_t raw_buf_size;
 
@@ -296,62 +296,6 @@ static esp_err_t sensor_init(void)
     return ESP_OK;
 }
 #endif /* HAS_CAMERA_PIPELINE */
-
-/*
- * RGB565 → O_UYY_E_VYY conversion for H.264 HW encoder.
- *
- * O_UYY_E_VYY format (ESP32-P4 HW encoder native format):
- *   Odd rows:  U Y Y U Y Y ...  (3 bytes per 2 pixels)
- *   Even rows: V Y Y V Y Y ...  (3 bytes per 2 pixels)
- * Total: 3 bytes per 2 pixels = 1.5 bytes/pixel
- */
-#if HAS_HW_H264
-static inline uint8_t clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
-
-static void rgb565_to_ouyy_evyy(const uint8_t *rgb565, uint8_t *dst, int width, int height)
-{
-    const uint16_t *src = (const uint16_t *)rgb565;
-    int row_out_stride = (width / 2) * 3;
-
-    for (int y = 0; y < height; y++) {
-        const uint16_t *row = src + y * width;
-        uint8_t *out = dst + y * row_out_stride;
-        bool odd_row = (y & 1);
-
-        for (int x = 0; x < width; x += 2) {
-            uint16_t p0 = row[x];
-            uint16_t p1 = row[x + 1];
-
-            /* RGB565 → 8-bit RGB (bit-shift, no division) */
-            int r0 = (p0 >> 8) & 0xF8; r0 |= r0 >> 5;
-            int g0 = (p0 >> 3) & 0xFC; g0 |= g0 >> 6;
-            int b0 = (p0 << 3) & 0xF8; b0 |= b0 >> 5;
-            int r1 = (p1 >> 8) & 0xF8; r1 |= r1 >> 5;
-            int g1 = (p1 >> 3) & 0xFC; g1 |= g1 >> 6;
-            int b1 = (p1 << 3) & 0xF8; b1 |= b1 >> 5;
-
-            /* Y for each pixel (BT.601) */
-            int y0 = (( 66 * r0 + 129 * g0 +  25 * b0 + 128) >> 8) + 16;
-            int y1 = (( 66 * r1 + 129 * g1 +  25 * b1 + 128) >> 8) + 16;
-
-            /* Chroma from average of pixel pair */
-            int ra = (r0 + r1) >> 1;
-            int ga = (g0 + g1) >> 1;
-            int ba = (b0 + b1) >> 1;
-
-            if (odd_row) {
-                int u = ((-38 * ra - 74 * ga + 112 * ba + 128) >> 8) + 128;
-                *out++ = clamp8(u);
-            } else {
-                int v = ((112 * ra - 94 * ga - 18 * ba + 128) >> 8) + 128;
-                *out++ = clamp8(v);
-            }
-            *out++ = clamp8(y0);
-            *out++ = clamp8(y1);
-        }
-    }
-}
-#endif
 
 /* ========== RTP H.264 over UDP ========== */
 
@@ -501,7 +445,7 @@ esp_err_t camera_h264_init(void)
     s_cam.rtp_sock = -1;
 
     /* Allocate buffers */
-    s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;  /* RGB565 */
+    s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2;  /* YUV420 = 1.5 bytes/pixel */
     s_cam.raw_buf_size = (s_cam.raw_buf_size + 63) & ~63;  /* Cache line align */
 
     for (int i = 0; i < NUM_BUFS; i++) {
@@ -513,6 +457,7 @@ esp_err_t camera_h264_init(void)
             return ESP_ERR_NO_MEM;
         }
 
+#if ENABLE_MJPEG
         /* JPEG output buffers */
 #if HAS_HW_JPEG
         size_t jpg_alloc_size = 0;
@@ -528,6 +473,7 @@ esp_err_t camera_h264_init(void)
             ESP_LOGE(TAG, "Failed to allocate JPEG buffer %d", i);
             return ESP_ERR_NO_MEM;
         }
+#endif /* ENABLE_MJPEG */
     }
 
     /* H.264 output buffer: 64-byte aligned for HW encoder DMA */
@@ -537,19 +483,9 @@ esp_err_t camera_h264_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    /* O_UYY_E_VYY conversion buffer: 1.5 bytes/pixel */
-    size_t yuv_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
-    yuv_buf_size = (yuv_buf_size + 63) & ~63;  /* Cache line align */
-    s_cam.yuv_buf = heap_caps_aligned_calloc(64, 1, yuv_buf_size, MALLOC_CAP_SPIRAM);
-    if (!s_cam.yuv_buf) {
-        ESP_LOGE(TAG, "Failed to allocate YUV conversion buffer");
-        return ESP_ERR_NO_MEM;
-    }
-
-    ESP_LOGI(TAG, "Buffers allocated: %d x (raw=%uKB + jpeg=%uKB) + h264=%uKB + yuv=%uKB",
+    ESP_LOGI(TAG, "Buffers allocated: %d x raw=%uKB + h264=%uKB",
              NUM_BUFS, (unsigned)(s_cam.raw_buf_size/1024),
-             (unsigned)(JPEG_BUF_SIZE/1024),
-             (unsigned)(H264_BUF_SIZE/1024), (unsigned)(yuv_buf_size/1024));
+             (unsigned)(H264_BUF_SIZE/1024));
 
 #if HAS_CAMERA_PIPELINE
     /* LDO for MIPI PHY */
@@ -579,7 +515,7 @@ esp_err_t camera_h264_init(void)
         .v_res = CAM_HEIGHT,
         .lane_bit_rate_mbps = CSI_LANE_BITRATE_MBPS,
         .input_data_color_type = CAM_CTLR_COLOR_RAW8,
-        .output_data_color_type = CAM_CTLR_COLOR_RGB565,
+        .output_data_color_type = CAM_CTLR_COLOR_YUV420,
         .data_lane_num = 2,
         .byte_swap_en = false,
         .queue_items = 1,
@@ -606,7 +542,7 @@ esp_err_t camera_h264_init(void)
         .clk_hz = 80 * 1000 * 1000,
         .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
         .input_data_color_type = ISP_COLOR_RAW8,
-        .output_data_color_type = ISP_COLOR_RGB565,
+        .output_data_color_type = ISP_COLOR_YUV420,
         .has_line_start_packet = false,
         .has_line_end_packet = false,
         .h_res = CAM_WIDTH,
@@ -615,7 +551,7 @@ esp_err_t camera_h264_init(void)
     ret = esp_isp_new_processor(&isp_config, &isp_proc);
     if (ret == ESP_OK) {
         esp_isp_enable(isp_proc);
-        ESP_LOGI(TAG, "ISP pipeline enabled (RAW8 → RGB565)");
+        ESP_LOGI(TAG, "ISP pipeline enabled (RAW8 → YUV420)");
     }
 
     /* Start CSI capture */
@@ -630,8 +566,8 @@ esp_err_t camera_h264_init(void)
     ESP_LOGW(TAG, "MIPI-CSI not available - stub mode");
 #endif
 
-    /* HW JPEG encoder */
-#if HAS_HW_JPEG
+#if ENABLE_MJPEG && HAS_HW_JPEG
+    /* HW JPEG encoder (only when MJPEG streaming is enabled) */
     jpeg_encode_engine_cfg_t jpeg_enc_cfg = { .timeout_ms = 100 };
     ret = jpeg_new_encoder_engine(&jpeg_enc_cfg, &s_cam.jpeg_handle);
     if (ret == ESP_OK) {
@@ -721,8 +657,8 @@ static void camera_capture_task(void *arg)
 
     /* Accumulated timing stats (reset every log interval) */
     uint32_t stat_frames = 0;
-    int64_t stat_wait_us = 0, stat_jpeg_us = 0, stat_cvt_us = 0, stat_h264_us = 0;
-    size_t stat_jpg_bytes = 0, stat_h264_bytes = 0;
+    int64_t stat_wait_us = 0, stat_h264_us = 0;
+    size_t stat_h264_bytes = 0;
 
     while (1) {
         int64_t t0 = esp_timer_get_time();
@@ -747,14 +683,14 @@ static void camera_capture_task(void *arg)
         esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        /* === JPEG encode (for MJPEG HTTP stream) === */
+        /* === JPEG encode (for MJPEG HTTP stream, disabled by default) === */
         int64_t t2 = t1;
-        size_t jpg_size_out = 0;
-#if HAS_HW_JPEG
+#if ENABLE_MJPEG && HAS_HW_JPEG
         {
+            size_t jpg_size_out = 0;
             int wr_idx = s_cam.jpeg_write_idx;
             jpeg_encode_cfg_t jpeg_cfg = {
-                .src_type = JPEG_ENCODE_IN_FORMAT_RGB565,
+                .src_type = JPEG_ENCODE_IN_FORMAT_YUV420,
                 .sub_sample = JPEG_DOWN_SAMPLING_YUV420,
                 .image_quality = JPEG_QUALITY,
                 .width = CAM_WIDTH,
@@ -781,17 +717,15 @@ static void camera_capture_task(void *arg)
 #endif
 
         /* === H.264 encode → send via UDP RTP === */
-        int64_t t3 = t2, t4 = t2;
+        int64_t t4 = t2;
         size_t h264_size_out = 0;
 #if HAS_HW_H264
         if (s_cam.h264_handle) {
-            /* RGB565 → O_UYY_E_VYY conversion */
-            rgb565_to_ouyy_evyy(frame_data, s_cam.yuv_buf, CAM_WIDTH, CAM_HEIGHT);
-            t3 = esp_timer_get_time();
+            /* ISP outputs YUV420 (O_UYY_E_VYY) directly — no conversion needed */
 
             /* HW H.264 encode */
             esp_h264_enc_in_frame_t in_frame = {
-                .raw_data = { .buffer = s_cam.yuv_buf },
+                .raw_data = { .buffer = frame_data },
             };
             in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
 
@@ -834,28 +768,21 @@ static void camera_capture_task(void *arg)
         /* Timing debug log (every 5 seconds) */
         stat_frames++;
         stat_wait_us += (t1 - t0);
-        stat_jpeg_us += (t2 - t1);
-        stat_cvt_us += (t3 - t2);
-        stat_h264_us += (t4 - t3);
-        stat_jpg_bytes += jpg_size_out;
+        stat_h264_us += (t4 - t2);
         stat_h264_bytes += h264_size_out;
 
         if ((now - last_log_us) > 5000000) {
             if (stat_frames > 0) {
-                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms jpeg=%ldms cvt=%ldms h264=%ldms "
-                         "total=%ldms | jpg=%luKB h264=%luKB",
+                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms h264=%ldms total=%ldms | h264=%luKB",
                          (long)stat_frames,
                          (long)(stat_wait_us / stat_frames / 1000),
-                         (long)(stat_jpeg_us / stat_frames / 1000),
-                         (long)(stat_cvt_us / stat_frames / 1000),
                          (long)(stat_h264_us / stat_frames / 1000),
-                         (long)((stat_wait_us + stat_jpeg_us + stat_cvt_us + stat_h264_us) / stat_frames / 1000),
-                         (unsigned long)(stat_jpg_bytes / 1024),
+                         (long)((stat_wait_us + stat_h264_us) / stat_frames / 1000),
                          (unsigned long)(stat_h264_bytes / 1024));
             }
             stat_frames = 0;
-            stat_wait_us = stat_jpeg_us = stat_cvt_us = stat_h264_us = 0;
-            stat_jpg_bytes = stat_h264_bytes = 0;
+            stat_wait_us = stat_h264_us = 0;
+            stat_h264_bytes = 0;
             last_log_us = now;
         }
     }

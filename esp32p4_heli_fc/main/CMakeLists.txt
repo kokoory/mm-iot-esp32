@@ -21,5 +21,5 @@ idf_component_register(
     INCLUDE_DIRS ${INCLUDE_DIRS}
     PRIV_REQUIRES driver spi_master i2c uart mcpwm esp_adc esp_timer nvs_flash
                   morselib mm_shims mmipal lwip esp_http_server mmregdb esp_event
-                  esp_driver_cam esp_driver_isp esp_driver_jpeg esp_h264
+                  esp_driver_cam esp_driver_isp esp_driver_jpeg esp_h264 esp_netif
 )
