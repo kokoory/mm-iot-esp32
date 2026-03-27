@@ -16,11 +16,11 @@
 #endif
 
 #ifndef SSID
-#define SSID                            HeliGCS
+#define SSID                            node2
 #endif
 
 #ifndef SAE_PASSPHRASE
-#define SAE_PASSPHRASE                  helicopter
+#define SAE_PASSPHRASE                  12345678
 #endif
 
 #ifndef SECURITY_TYPE
