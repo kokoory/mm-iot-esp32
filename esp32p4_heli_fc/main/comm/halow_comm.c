@@ -13,7 +13,7 @@
  *   - Flight controller running on Core 0 (same binary)
  *
  * Network Topology:
- *   FC (Core 0) <-RPC-> HaLow Module (Core 1) <-SPI-> WM6180 ~~~HaLow~~~ AP <-> GCS
+ *   FC (Core 0) <-RPC-> HaLow Module (Core 1) <-SPI-> MMECH06 ~~~HaLow~~~ AP <-> GCS
  *                           |
  *                        MIPI-CSI
  *                        Camera
