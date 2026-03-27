@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct {
     float altitude;         /* estimated altitude in meters (positive up) */
