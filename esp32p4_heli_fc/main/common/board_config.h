@@ -74,8 +74,8 @@
 /* ── Task Stack Sizes ────────────────────────────────────────── */
 #define SENSOR_TASK_STACK      8192
 #define FLIGHT_CTRL_STACK      8192
-#define ACTUATOR_TASK_STACK    4096
-#define SYSMON_TASK_STACK      4096
+#define ACTUATOR_TASK_STACK    8192
+#define SYSMON_TASK_STACK      8192
 
 /* ── Core Assignment ─────────────────────────────────────────── */
 #define FC_CORE     0   /* Flight controller on Core 0 */
