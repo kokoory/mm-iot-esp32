@@ -17,6 +17,8 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -674,13 +676,14 @@ void sysmon_agent_start(rpc_context_t *rpc)
     ESP_LOGI(TAG, "Starting system monitor agent on Core %d, priority %d",
              FC_CORE, SYSMON_TASK_PRIORITY);
 
-    xTaskCreatePinnedToCore(
+    xTaskCreatePinnedToCoreWithCaps(
         sysmon_task,
         "sysmon_agent",
         SYSMON_TASK_STACK,
         (void *)rpc,
         SYSMON_TASK_PRIORITY,
         NULL,
-        FC_CORE
+        FC_CORE,
+        MALLOC_CAP_SPIRAM
     );
 }

@@ -16,6 +16,8 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/mcpwm_prelude.h"
@@ -256,13 +258,14 @@ void actuator_agent_start(void)
     ESP_LOGI(TAG, "Starting actuator agent on Core %d, priority %d",
              FC_CORE, ACTUATOR_TASK_PRIORITY);
 
-    xTaskCreatePinnedToCore(
+    xTaskCreatePinnedToCoreWithCaps(
         actuator_task,
         "actuator_agent",
         ACTUATOR_TASK_STACK,
         NULL,
         ACTUATOR_TASK_PRIORITY,
         NULL,
-        FC_CORE
+        FC_CORE,
+        MALLOC_CAP_SPIRAM
     );
 }

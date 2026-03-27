@@ -16,6 +16,8 @@
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/spi_master.h"
@@ -443,13 +445,14 @@ void sensor_agent_start(void)
     ESP_LOGI(TAG, "Starting sensor agent on Core %d, priority %d",
              FC_CORE, SENSOR_TASK_PRIORITY);
 
-    xTaskCreatePinnedToCore(
+    xTaskCreatePinnedToCoreWithCaps(
         sensor_task,
         "sensor_agent",
         SENSOR_TASK_STACK,
         NULL,
         SENSOR_TASK_PRIORITY,
         NULL,
-        FC_CORE
+        FC_CORE,
+        MALLOC_CAP_SPIRAM
     );
 }
