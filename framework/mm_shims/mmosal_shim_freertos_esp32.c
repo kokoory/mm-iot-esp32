@@ -14,6 +14,7 @@
 #include "esp_private/startup_internal.h"
 #include "esp_idf_version.h"
 #include "esp_timer.h"
+#include <stdarg.h>
 
 #include "mmosal.h"
 #include "mmhal_os.h"
