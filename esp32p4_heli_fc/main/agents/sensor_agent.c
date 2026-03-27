@@ -32,11 +32,13 @@
 #include "../uorb/topics/vehicle_attitude.h"
 #include "../uorb/topics/vehicle_local_position.h"
 #include "../uorb/topics/rc_channels.h"
+#include "../uorb/topics/airspeed.h"
 #include "../drivers/ism330dhc.h"
 #include "../drivers/bmp390.h"
 #include "../drivers/lis3mdl.h"
 #include "../drivers/gps_nmea.h"
 #include "../drivers/sbus.h"
+#include "../drivers/mprls.h"
 #include "../estimator/ahrs.h"
 #include "../estimator/altitude_estimator.h"
 #include "../common/param.h"
@@ -48,6 +50,7 @@ static ism330dhc_t  s_imu;
 static bmp390_t     s_baro;
 static lis3mdl_t    s_mag;
 static gps_handle_t s_gps;
+static mprls_t      s_mprls;
 
 /* Estimators */
 static ahrs_t           s_ahrs;
@@ -180,6 +183,14 @@ static void sensor_task(void *param)
         ESP_LOGE(TAG, "SBUS init FAILED");
     }
 
+    /* MPRLS differential pressure sensor (pitot tube airspeed) */
+    bool mprls_ok = (mprls_init(&s_mprls, i2c_bus, MPRLS_I2C_ADDR) == 0);
+    if (mprls_ok) {
+        ESP_LOGI(TAG, "MPRLS pressure sensor initialized");
+    } else {
+        ESP_LOGW(TAG, "MPRLS init FAILED (airspeed unavailable)");
+    }
+
     /* ---- Initialize estimators ---- */
     ahrs_init(&s_ahrs, param_get(PARAM_AHRS_BETA));
     alt_estimator_init(&s_alt_est);
@@ -195,6 +206,7 @@ static void sensor_task(void *param)
 
     /* RC_CHANNELS: populated by SBUS receiver or RPC RC override from GCS */
     orb_advertise(ORB_ID_RC_CHANNELS, sizeof(rc_channels_t));
+    orb_advertise(ORB_ID_AIRSPEED, sizeof(airspeed_t));
 
     /* ---- Main loop at 1 kHz ---- */
     TickType_t last_wake = xTaskGetTickCount();
@@ -379,6 +391,20 @@ imu_done:
                     rc_msg.channels[i] = sbus_channel_to_float(sbus.channels[i]);
                 }
                 orb_publish(ORB_ID_RC_CHANNELS, &rc_msg);
+            }
+        }
+
+        /* ---- MPRLS Airspeed: every 50th cycle (20 Hz) ---- */
+        if (mprls_ok && (cycle % 50) == 7) {
+            float dp_pa;
+            if (mprls_read(&s_mprls, &dp_pa) == 0) {
+                airspeed_t as_msg;
+                as_msg.timestamp_us = now_us;
+                as_msg.differential_pressure_pa = dp_pa;
+                as_msg.indicated_airspeed = mprls_dp_to_airspeed(dp_pa);
+                as_msg.temperature = 0.0f;  /* TODO: fill from baro temp for TAS */
+                as_msg.valid = (dp_pa >= 0.0f && dp_pa < 6000.0f);  /* ~100 m/s max */
+                orb_publish(ORB_ID_AIRSPEED, &as_msg);
             }
         }
 

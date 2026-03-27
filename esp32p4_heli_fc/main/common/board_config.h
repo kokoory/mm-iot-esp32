@@ -58,6 +58,7 @@
 /* ── I2C Addresses ───────────────────────────────────────────── */
 #define BMP390_I2C_ADDR     0x77
 #define LIS3MDL_I2C_ADDR    0x1E
+#define MPRLS_I2C_ADDR      0x18      /* Honeywell MPRLS differential pressure */
 
 /* ── Task Priorities ─────────────────────────────────────────── */
 #define SENSOR_TASK_PRIORITY    6

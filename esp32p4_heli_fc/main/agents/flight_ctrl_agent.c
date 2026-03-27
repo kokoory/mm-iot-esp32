@@ -35,6 +35,7 @@
 #include "../uorb/topics/vehicle_status.h"
 #include "../uorb/topics/actuator_controls.h"
 #include "../uorb/topics/sensor_gps.h"
+#include "../uorb/topics/airspeed.h"
 #include "../control/attitude_control.h"
 #include "../control/rate_control.h"
 #include "../control/pos_control.h"
@@ -43,6 +44,10 @@ static const char *TAG = "flight_ctrl";
 
 /* Nominal controller timestep (500 Hz) */
 #define CTRL_DT_NOMINAL  0.002f
+
+/* Airspeed limiting */
+#define AIRSPEED_MAX         20.0f  /* m/s max forward airspeed (~72 km/h) */
+#define AIRSPEED_WARN        15.0f  /* m/s start pitch-back to slow down */
 
 /* Landing parameters */
 #define LAND_DESCENT_RATE    0.5f   /* m/s descent rate during landing */
@@ -128,6 +133,7 @@ static void flight_ctrl_task(void *param)
     orb_subscription_t *rc_sub   = orb_subscribe(ORB_ID_RC_CHANNELS);
     orb_subscription_t *stat_sub = orb_subscribe(ORB_ID_VEHICLE_STATUS);
     orb_subscription_t *gps_sub  = orb_subscribe(ORB_ID_SENSOR_GPS);
+    orb_subscription_t *as_sub   = orb_subscribe(ORB_ID_AIRSPEED);
 
     /* Advertise output topic */
     orb_advertise(ORB_ID_ACTUATOR_CONTROLS, sizeof(actuator_controls_t));
@@ -148,6 +154,7 @@ static void flight_ctrl_task(void *param)
     rc_channels_t            rc      = {0};
     vehicle_status_t         status  = {0};
     sensor_gps_t             gps     = {0};
+    airspeed_t               arspd   = {0};
 
     /* Persistent flight mode state */
     float alt_hold_sp = 0.0f;
@@ -187,6 +194,7 @@ static void flight_ctrl_task(void *param)
         orb_copy(rc_sub, &rc);
         orb_copy(stat_sub, &status);
         orb_copy(gps_sub, &gps);
+        orb_copy(as_sub, &arspd);
 
         /* ---- Capture home on first arm with GPS 3D fix ---- */
         if (status.arm_state == ARM_STATE_ARMED && !home_set &&
@@ -226,6 +234,19 @@ static void flight_ctrl_task(void *param)
         float rc_pitch = apply_deadzone(rc.channels[1], dz);
         float rc_coll  = rc.channels[2] * 2.0f - 1.0f;
         float rc_yaw   = apply_deadzone(rc.channels[3], dz);
+
+        /* ---- Airspeed limiting: reduce forward pitch when overspeed ---- */
+        float airspeed_pitch_limit = 1.0f;  /* 1.0 = no limit */
+        if (arspd.valid && arspd.indicated_airspeed > AIRSPEED_WARN) {
+            /* Linear ramp: at WARN → 1.0, at MAX → 0.0 */
+            airspeed_pitch_limit = 1.0f - (arspd.indicated_airspeed - AIRSPEED_WARN) /
+                                           (AIRSPEED_MAX - AIRSPEED_WARN);
+            if (airspeed_pitch_limit < 0.0f) airspeed_pitch_limit = 0.0f;
+            /* Only limit nose-down pitch (positive pitch = forward flight) */
+            if (rc_pitch > 0.0f) {
+                rc_pitch *= airspeed_pitch_limit;
+            }
+        }
 
         switch (status.flight_mode) {
         case FLIGHT_MODE_MANUAL:
