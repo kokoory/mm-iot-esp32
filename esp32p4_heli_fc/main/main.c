@@ -100,7 +100,18 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing RPC inter-core communication...");
     rpc_init(&g_rpc_ctx);
 
-    /* Step 6: Start flight controller agents on Core 0 */
+    /* Step 6: Start HaLow communication on Core 1 FIRST
+     * morselib needs significant internal RAM during BCF firmware loading.
+     * FC agents create SPI/I2C/MCPWM/UART drivers which consume internal RAM.
+     * Starting HaLow first ensures morselib gets the RAM it needs. */
+    ESP_LOGI(TAG, "Starting HaLow communication on Core %d...", COMM_CORE);
+    halow_comm_start(&g_rpc_ctx);
+
+    /* Wait for morselib BCF loading to complete (heaviest internal RAM consumer) */
+    ESP_LOGI(TAG, "Waiting for HaLow init to complete before starting FC agents...");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    /* Step 7: Start flight controller agents on Core 0 */
     ESP_LOGI(TAG, "Starting Sensor Agent on Core %d (priority %d)...",
              FC_CORE, SENSOR_TASK_PRIORITY);
     sensor_agent_start();
@@ -119,10 +130,6 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting System Monitor Agent on Core %d (priority %d)...",
              FC_CORE, SYSMON_TASK_PRIORITY);
     sysmon_agent_start(&g_rpc_ctx);
-
-    /* Step 7: Start HaLow communication on Core 1 (shared RPC context) */
-    ESP_LOGI(TAG, "Starting HaLow communication on Core %d...", COMM_CORE);
-    halow_comm_start(&g_rpc_ctx);
 
     /* Step 8: Report startup complete */
     ESP_LOGI(TAG, "All agents started successfully.");
