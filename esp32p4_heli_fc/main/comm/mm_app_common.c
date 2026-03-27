@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include "lwip/inet.h"
 #include "mmosal.h"
 #include "mmhal.h"
 #include "mmwlan.h"

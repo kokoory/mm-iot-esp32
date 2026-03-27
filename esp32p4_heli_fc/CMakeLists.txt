@@ -8,11 +8,15 @@ endif()
 
 message(STATUS "MMIOT_ROOT: $ENV{MMIOT_ROOT}")
 
-# Workaround: ESP-IDF < 6.1 does not expose LWIP_NETIF_LINK_CALLBACK via KConfig.
-# https://github.com/espressif/esp-idf/commit/16b02aeb7a805de671ca92c0c7630eda091794ce
-if ((IDF_VERSION_MAJOR VERSION_LESS 6) OR
-    (IDF_VERSION_MAJOR EQUAL 6 AND IDF_VERSION_MINOR LESS_EQUAL 0))
-    add_compile_definitions(LWIP_NETIF_LINK_CALLBACK=1)
+# Required by mmipal for lwip netif callbacks
+add_compile_definitions(LWIP_NETIF_LINK_CALLBACK=1)
+
+# Suppress warnings from framework code (matches reference esp32p4halow)
+add_compile_options(-fdiagnostics-color=always -w)
+
+if(DEFINED COUNTRY_CODE)
+    message("Using country code: ${COUNTRY_CODE}")
+    add_compile_definitions(COUNTRY_CODE="${COUNTRY_CODE}")
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
