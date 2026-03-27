@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
@@ -100,41 +101,17 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing RPC inter-core communication...");
     rpc_init(&g_rpc_ctx);
 
-    /* Step 6: Start HaLow communication on Core 1 FIRST
-     * morselib needs significant internal RAM during BCF firmware loading.
-     * FC agents create SPI/I2C/MCPWM/UART drivers which consume internal RAM.
-     * Starting HaLow first ensures morselib gets the RAM it needs. */
+    /* === HaLow-only test: disable all FC agents to isolate crash ===
+     * FC agents will be re-enabled once HaLow runs stable. */
+
+    ESP_LOGI(TAG, "Internal RAM free: %lu bytes",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
     ESP_LOGI(TAG, "Starting HaLow communication on Core %d...", COMM_CORE);
     halow_comm_start(&g_rpc_ctx);
 
-    /* Wait for morselib BCF loading to complete (heaviest internal RAM consumer) */
-    ESP_LOGI(TAG, "Waiting for HaLow init to complete before starting FC agents...");
-    vTaskDelay(pdMS_TO_TICKS(3000));
-
-    /* Step 7: Start flight controller agents on Core 0 */
-    ESP_LOGI(TAG, "Starting Sensor Agent on Core %d (priority %d)...",
-             FC_CORE, SENSOR_TASK_PRIORITY);
-    sensor_agent_start();
-
-    /* Small delay to let sensors initialize before starting control loop */
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    ESP_LOGI(TAG, "Starting Flight Controller Agent on Core %d (priority %d)...",
-             FC_CORE, FLIGHT_CTRL_PRIORITY);
-    flight_ctrl_agent_start();
-
-    ESP_LOGI(TAG, "Starting Actuator Agent on Core %d (priority %d)...",
-             FC_CORE, ACTUATOR_TASK_PRIORITY);
-    actuator_agent_start();
-
-    ESP_LOGI(TAG, "Starting System Monitor Agent on Core %d (priority %d)...",
-             FC_CORE, SYSMON_TASK_PRIORITY);
-    sysmon_agent_start(&g_rpc_ctx);
-
-    /* Step 8: Report startup complete */
-    ESP_LOGI(TAG, "All agents started successfully.");
-    ESP_LOGI(TAG, "Free heap after init: %lu bytes", (unsigned long)esp_get_free_heap_size());
-    ESP_LOGI(TAG, "System ready. Waiting for arm command from GCS...");
+    ESP_LOGI(TAG, "HaLow-only mode (FC agents disabled for testing).");
+    ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     /* app_main returns, FreeRTOS scheduler continues running tasks */
 }
