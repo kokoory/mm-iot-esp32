@@ -1,15 +1,11 @@
 /*
  * ESP32-P4 Helicopter Flight Controller - Main Entry Point
  *
- * CPU0 (HP Core 0): Flight controller tasks
- *   - Sensor Agent (1kHz IMU, 100Hz Baro/Mag, GPS)
- *   - Flight Controller Agent (500Hz control loop)
- *   - Actuator Agent (500Hz PWM output)
- *   - System Monitor Agent (10Hz health/battery/failsafe)
- *
- * CPU1 (HP Core 1): Communication tasks
- *   - HaLow WiFi + MAVLink + GCS bridge
- *   - Shares RPC queues with Core 0 via single rpc_context_t
+ * Initialization order (matching reference esp32p4halow):
+ *   1. NVS, params, uORB, RPC
+ *   2. Wi-Fi HaLow init (MUST run from app_main / Core 0)
+ *   3. FC agents on Core 0
+ *   4. Comm tasks (camera, MAVLink) on Core 1
  */
 
 #include <stdio.h>
@@ -67,51 +63,50 @@ static void init_status_led(void)
     gpio_set_level(PIN_STATUS_LED, 0);
 }
 
-static void print_banner(void)
-{
-    ESP_LOGI(TAG, "====================================");
-    ESP_LOGI(TAG, " ESP32-P4 Helicopter Flight Controller");
-    ESP_LOGI(TAG, " PX4-inspired | 120 deg CCPM | Tail ESC");
-    ESP_LOGI(TAG, "====================================");
-    ESP_LOGI(TAG, "Core 0: Flight Controller Tasks");
-    ESP_LOGI(TAG, "Core 1: HaLow + Camera + MAVLink GCS Bridge");
-    ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
-}
-
 void app_main(void)
 {
-    /* Step 1: Initialize NVS */
+    /* Step 1: Initialize NVS + params */
     init_nvs();
-
-    /* Step 1b: Initialize parameter system (loads from NVS) */
     ESP_LOGI(TAG, "Initializing parameter system...");
     param_init();
 
-    /* Step 2: Print startup banner */
-    print_banner();
-
-    /* Step 3: Initialize status LED */
-    init_status_led();
-
-    /* Step 4: Initialize uORB pub/sub message bus */
-    ESP_LOGI(TAG, "Initializing uORB message bus...");
-    orb_init();
-
-    /* Step 5: Initialize inter-core RPC */
-    ESP_LOGI(TAG, "Initializing RPC inter-core communication...");
-    rpc_init(&g_rpc_ctx);
-
-    /* === HaLow-only test: disable all FC agents to isolate crash ===
-     * FC agents will be re-enabled once HaLow runs stable. */
-
+    ESP_LOGI(TAG, "====================================");
+    ESP_LOGI(TAG, " ESP32-P4 Helicopter Flight Controller");
+    ESP_LOGI(TAG, "====================================");
+    ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
     ESP_LOGI(TAG, "Internal RAM free: %lu bytes",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-    ESP_LOGI(TAG, "Starting HaLow communication on Core %d...", COMM_CORE);
+    init_status_led();
+
+    /* Step 2: Initialize uORB + RPC */
+    orb_init();
+    rpc_init(&g_rpc_ctx);
+
+    /* Step 3: Wi-Fi HaLow init — MUST run from app_main (Core 0)
+     * This matches the reference esp32p4halow example exactly.
+     * morselib creates internal tasks that expect Core 0 context. */
+    halow_comm_init_wlan();
+
+    ESP_LOGI(TAG, "Internal RAM free after HaLow: %lu bytes",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+    /* Step 4: Start comm tasks (camera, MAVLink) on Core 1 */
     halow_comm_start(&g_rpc_ctx);
 
-    ESP_LOGI(TAG, "HaLow-only mode (FC agents disabled for testing).");
-    ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
+    /* Step 5: Start FC agents on Core 0
+     * (temporarily disabled for HaLow-only testing)
+     */
+#if 0  /* Re-enable once HaLow runs stable */
+    sensor_agent_start();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    flight_ctrl_agent_start();
+    actuator_agent_start();
+    sysmon_agent_start(&g_rpc_ctx);
+#endif
+
+    ESP_LOGI(TAG, "Init complete. Free heap: %lu bytes",
+             (unsigned long)esp_get_free_heap_size());
 
     /* app_main returns, FreeRTOS scheduler continues running tasks */
 }

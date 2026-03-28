@@ -1,31 +1,8 @@
 /*
- * ESP32-P4 HaLow Communication Module (Core 1)
+ * ESP32-P4 HaLow Communication Module
  *
- * Integrates three subsystems on Core 1:
- *   1. Wi-Fi HaLow (MMECH06) - Long-range sub-GHz wireless link
- *   2. MIPI-CSI Camera + H.264  - Hardware-encoded video streaming
- *   3. MAVLink GCS Bridge        - Telemetry/command via RPC from Core 0
- *
- * Hardware:
- *   - Waveshare ESP32-P4-Module-DEV-KIT board
- *   - MMECH06 Wi-Fi HaLow module (SPI, BCF=bcf_mf08651_us.mbin)
- *   - MIPI-CSI camera (OV5647 / SC2336)
- *   - Flight controller running on Core 0 (same binary)
- *
- * Network Topology:
- *   FC (Core 0) <-RPC-> HaLow Module (Core 1) <-SPI-> MMECH06 ~~~HaLow~~~ AP <-> GCS
- *                           |
- *                        MIPI-CSI
- *                        Camera
- *
- * Endpoints:
- *   http://<ip>/        - MJPEG camera stream (fallback)
- *   http://<ip>/h264    - H.264 camera stream
- *   http://<ip>/status  - JSON system status
- *   UDP 14550           - MAVLink telemetry (GCS port)
- *
- * The RPC context is shared with the flight controller running on Core 0.
- * It is passed in via halow_comm_start() -- NOT created locally.
+ * Wi-Fi HaLow init (morselib) MUST run from app_main (Core 0) - same as
+ * the reference esp32p4halow example. Camera + MAVLink run on Core 1.
  */
 
 #include <string.h>
@@ -51,8 +28,8 @@ static const char *TAG = "halow_main";
 #define MAVLINK_TASK_PRIORITY    5
 #define MAVLINK_TASK_CORE        1
 
-#define HALOW_INIT_TASK_STACK    8192
-#define HALOW_INIT_TASK_PRIORITY 4
+#define HALOW_COMM_TASK_STACK   8192
+#define HALOW_COMM_TASK_PRIORITY 4
 
 /**
  * Print system status summary to console.
@@ -69,33 +46,19 @@ static void print_status(void)
     printf("---------------------------\n\n");
 }
 
-/* ── HaLow init task (runs on Core 1) ────────────────────────── */
+/* ── Communication task (runs on Core 1 AFTER HaLow is connected) ── */
 
-static void halow_init_task(void *param)
+static void halow_comm_task(void *param)
 {
     rpc_context_t *rpc = (rpc_context_t *)param;
     esp_err_t err;
 
-    ESP_LOGI(TAG, "ESP32-P4 HaLow Communication Module starting on Core %d...",
-             xPortGetCoreID());
-
-    printf("\n");
-    printf("==============================================\n");
-    printf("  ESP32-P4 HaLow Drone System\n");
-    printf("  Camera + MAVLink + Wi-Fi HaLow\n");
-    printf("  Built " __DATE__ " " __TIME__ "\n");
-    printf("==============================================\n\n");
-
-    /* === Phase 1: Wi-Fi HaLow === */
-    ESP_LOGI(TAG, "Phase 1: Initializing Wi-Fi HaLow...");
-    app_wlan_init();
-    app_wlan_start();
-    ESP_LOGI(TAG, "Wi-Fi HaLow connected");
+    ESP_LOGI(TAG, "Communication task running on Core %d", xPortGetCoreID());
 
     esp_event_loop_create_default();
 
-    /* === Phase 2: GCS Bridge + MAVLink Handler === */
-    ESP_LOGI(TAG, "Phase 2: Initializing GCS bridge + MAVLink handler...");
+    /* === GCS Bridge + MAVLink Handler === */
+    ESP_LOGI(TAG, "Initializing GCS bridge + MAVLink handler...");
 
     if (gcs_bridge_init() != 0) {
         ESP_LOGE(TAG, "GCS bridge initialization failed");
@@ -129,8 +92,8 @@ static void halow_init_task(void *param)
         ESP_LOGI(TAG, "MAVLink handler task started on Core %d", MAVLINK_TASK_CORE);
     }
 
-    /* === Phase 3: Camera + H.264 === */
-    ESP_LOGI(TAG, "Phase 3: Initializing MIPI-CSI camera + H.264...");
+    /* === Camera + H.264 === */
+    ESP_LOGI(TAG, "Initializing MIPI-CSI camera + H.264...");
     err = camera_h264_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(err));
@@ -147,10 +110,8 @@ static void halow_init_task(void *param)
 
     uint32_t loop_count = 0;
     while (1) {
-        /* Send ARP keepalive every 5 seconds */
         app_wlan_arp_send();
 
-        /* Print status every 30 seconds */
         if (loop_count % 6 == 0) {
             print_status();
         }
@@ -162,16 +123,32 @@ static void halow_init_task(void *param)
 
 /* ── Public API ───────────────────────────────────────────────── */
 
+void halow_comm_init_wlan(void)
+{
+    ESP_LOGI(TAG, "Phase 1: Initializing Wi-Fi HaLow (from Core 0)...");
+
+    printf("\n");
+    printf("==============================================\n");
+    printf("  ESP32-P4 HaLow Drone System\n");
+    printf("  Camera + MAVLink + Wi-Fi HaLow\n");
+    printf("  Built " __DATE__ " " __TIME__ "\n");
+    printf("==============================================\n\n");
+
+    app_wlan_init();
+    app_wlan_start();
+    ESP_LOGI(TAG, "Wi-Fi HaLow connected");
+}
+
 void halow_comm_start(rpc_context_t *rpc)
 {
-    ESP_LOGI(TAG, "Launching HaLow communication on Core %d", MAVLINK_TASK_CORE);
+    ESP_LOGI(TAG, "Launching comm tasks on Core %d", MAVLINK_TASK_CORE);
 
     xTaskCreatePinnedToCore(
-        halow_init_task,
-        "halow_init",
-        HALOW_INIT_TASK_STACK,
+        halow_comm_task,
+        "halow_comm",
+        HALOW_COMM_TASK_STACK,
         (void *)rpc,
-        HALOW_INIT_TASK_PRIORITY,
+        HALOW_COMM_TASK_PRIORITY,
         NULL,
         MAVLINK_TASK_CORE
     );
