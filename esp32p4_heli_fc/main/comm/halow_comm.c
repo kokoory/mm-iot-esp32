@@ -55,6 +55,7 @@ static void halow_comm_task(void *param)
 
     ESP_LOGI(TAG, "Communication task running on Core %d", xPortGetCoreID());
 
+#if 0  /* Disabled for camera-only test — re-enable once video streams OK */
     /* === GCS Bridge + MAVLink Handler === */
     ESP_LOGI(TAG, "Initializing GCS bridge + MAVLink handler...");
 
@@ -89,6 +90,7 @@ static void halow_comm_task(void *param)
     } else {
         ESP_LOGI(TAG, "MAVLink handler task started on Core %d", MAVLINK_TASK_CORE);
     }
+#endif
 
     /* === Camera + H.264 === */
     ESP_LOGI(TAG, "Initializing MIPI-CSI camera + H.264...");
