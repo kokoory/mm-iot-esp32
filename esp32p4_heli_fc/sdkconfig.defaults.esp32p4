@@ -2,18 +2,10 @@
 # ESP32-P4 specific configuration for Helicopter Flight Controller
 # Hardware: Waveshare ESP32-P4-Module-DEV-KIT + MMECH06
 #
-CONFIG_IDF_TARGET="esp32p4"
-CONFIG_FREERTOS_HZ=1000
-CONFIG_FREERTOS_UNICORE=n
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
-CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# Based on working reference: examples/esp32p4halow/sdkconfig.defaults.esp32p4
+#
 
-# ESP32-P4 has dual-core RISC-V, enable both cores
-CONFIG_FREERTOS_NUMBER_OF_CORES=2
-
-# ── HaLow SPI pins (matching reference esp32p4halow config) ──
+# ── HaLow SPI pins (matching reference exactly) ──
 CONFIG_MM_RESET_N=20
 CONFIG_MM_WAKE=23
 CONFIG_MM_BUSY=32
@@ -24,21 +16,6 @@ CONFIG_MM_SPI_CS=4
 CONFIG_MM_SPI_IRQ=21
 CONFIG_MM_BCF_FILE="bcf_fgh100mhaamd.mbin"
 
-# ── SPIRAM (camera frame buffers + H.264 encode) ──
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_200M=y
-CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
-
-# ── Camera (OV5647 via MIPI-CSI) ──
+# ── Camera (OV5647 via MIPI-CSI, matching reference) ──
 CONFIG_CAMERA_OV5647=y
 CONFIG_CAMERA_OV5647_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
-
-# ── MBEDTLS (HaLow SAE authentication) ──
-CONFIG_MBEDTLS_NIST_KW_C=y
-
-# ── Flash ──
-CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
-
-# ── Watchdog ──
-CONFIG_ESP_TASK_WDT_TIMEOUT_S=10

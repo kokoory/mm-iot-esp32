@@ -55,8 +55,6 @@ static void halow_comm_task(void *param)
 
     ESP_LOGI(TAG, "Communication task running on Core %d", xPortGetCoreID());
 
-    esp_event_loop_create_default();
-
     /* === GCS Bridge + MAVLink Handler === */
     ESP_LOGI(TAG, "Initializing GCS bridge + MAVLink handler...");
 
@@ -137,6 +135,9 @@ void halow_comm_init_wlan(void)
     app_wlan_init();
     app_wlan_start();
     ESP_LOGI(TAG, "Wi-Fi HaLow connected");
+
+    /* Create default event loop AFTER HaLow is connected (matches reference) */
+    esp_event_loop_create_default();
 }
 
 void halow_comm_start(rpc_context_t *rpc)
