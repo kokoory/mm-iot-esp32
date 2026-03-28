@@ -54,9 +54,9 @@ static const char *TAG = "camera_h264";
 #define MIPI_LDO_VOLTAGE_MV  2500
 
 /* Camera format */
-#define CAM_FORMAT          "MIPI_2lane_24Minput_RAW8_640x480_50fps"
-#define CAM_WIDTH           640
-#define CAM_HEIGHT          480
+#define CAM_FORMAT          "MIPI_2lane_24Minput_RAW8_800x640_50fps"
+#define CAM_WIDTH           800
+#define CAM_HEIGHT          640
 
 /* MIPI CSI lane bitrate */
 #define CSI_LANE_BITRATE_MBPS  200
@@ -67,7 +67,7 @@ static const char *TAG = "camera_h264";
 
 /* H.264 encoder settings */
 #define H264_GOP            60           /* I-frame every 60 frames (~12s at 5fps) */
-#define H264_FPS            10           /* Encode at 10fps for HaLow */
+#define H264_FPS            5            /* Encode at 5fps for HaLow bandwidth */
 #define H264_QP_MIN         30
 #define H264_QP_MAX         45           /* Aggressive compression to prevent bursts */
 #define H264_BITRATE        300000       /* 300 Kbps target for HaLow (640x480) */
@@ -82,7 +82,7 @@ static const char *TAG = "camera_h264";
 #define RTP_CLOCK_RATE      90000        /* 90kHz for video */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
-#define STREAM_TARGET_FPS   10
+#define STREAM_TARGET_FPS   5
 
 /* Set to 1 to enable MJPEG HTTP streaming (adds ~32ms latency per frame) */
 #define ENABLE_MJPEG        0
