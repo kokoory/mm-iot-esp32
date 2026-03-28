@@ -54,9 +54,9 @@ static const char *TAG = "camera_h264";
 #define MIPI_LDO_VOLTAGE_MV  2500
 
 /* Camera format */
-#define CAM_FORMAT          "MIPI_2lane_24Minput_RAW8_800x640_50fps"
-#define CAM_WIDTH           800
-#define CAM_HEIGHT          640
+#define CAM_FORMAT          "MIPI_2lane_24Minput_RAW8_640x480_50fps"
+#define CAM_WIDTH           640
+#define CAM_HEIGHT          480
 
 /* MIPI CSI lane bitrate */
 #define CSI_LANE_BITRATE_MBPS  200
@@ -70,7 +70,7 @@ static const char *TAG = "camera_h264";
 #define H264_FPS            10           /* Encode at 10fps for HaLow */
 #define H264_QP_MIN         30
 #define H264_QP_MAX         45           /* Aggressive compression to prevent bursts */
-#define H264_BITRATE        500000       /* 500 Kbps target for HaLow */
+#define H264_BITRATE        300000       /* 300 Kbps target for HaLow (640x480) */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
 /* UDP RTP streaming for H.264 */
