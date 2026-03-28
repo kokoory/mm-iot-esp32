@@ -166,6 +166,11 @@ static struct {
     uint32_t frame_count;
     int64_t stats_start_time;
 
+    /* RTP send diagnostics */
+    uint32_t rtp_pkts_sent;
+    uint32_t rtp_pkts_dropped;
+    uint32_t rtp_bytes_sent;
+
     /* Camera task handle */
     TaskHandle_t cam_task_handle;
 
@@ -327,8 +332,10 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
         pkt[11] = RTP_SSRC & 0xFF;
 
         memcpy(pkt + RTP_HEADER_SIZE, nalu, len);
-        sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + len, 0,
+        int ret = sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + len, 0,
                (struct sockaddr *)&s_cam.rtp_dest, sizeof(s_cam.rtp_dest));
+        if (ret > 0) { s_cam.rtp_pkts_sent++; s_cam.rtp_bytes_sent += ret; }
+        else { s_cam.rtp_pkts_dropped++; }
         s_cam.rtp_seq++;
     } else {
         /* FU-A fragmentation */
@@ -364,8 +371,10 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
                                         (last_frag ? 0x40 : 0x00) | nal_type;
 
             memcpy(pkt + RTP_HEADER_SIZE + 2, payload, chunk);
-            sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + 2 + chunk, 0,
+            int ret = sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + 2 + chunk, 0,
                    (struct sockaddr *)&s_cam.rtp_dest, sizeof(s_cam.rtp_dest));
+            if (ret > 0) { s_cam.rtp_pkts_sent++; s_cam.rtp_bytes_sent += ret; }
+            else { s_cam.rtp_pkts_dropped++; }
 
             s_cam.rtp_seq++;
             payload += chunk;
@@ -773,12 +782,15 @@ static void camera_capture_task(void *arg)
 
         if ((now - last_log_us) > 5000000) {
             if (stat_frames > 0) {
-                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms h264=%ldms total=%ldms | h264=%luKB",
+                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms h264=%ldms total=%ldms | h264=%luKB | rtp: %lu sent, %lu drop, %luKB",
                          (long)stat_frames,
                          (long)(stat_wait_us / stat_frames / 1000),
                          (long)(stat_h264_us / stat_frames / 1000),
                          (long)((stat_wait_us + stat_h264_us) / stat_frames / 1000),
-                         (unsigned long)(stat_h264_bytes / 1024));
+                         (unsigned long)(stat_h264_bytes / 1024),
+                         (unsigned long)s_cam.rtp_pkts_sent,
+                         (unsigned long)s_cam.rtp_pkts_dropped,
+                         (unsigned long)(s_cam.rtp_bytes_sent / 1024));
             }
             stat_frames = 0;
             stat_wait_us = stat_h264_us = 0;
