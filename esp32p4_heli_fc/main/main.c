@@ -9,7 +9,9 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -65,6 +67,13 @@ static void init_status_led(void)
 
 void app_main(void)
 {
+    /* Pre-initialize newlib's __env_lock before any code that might log from
+     * ISR/critical-section context. The lock is lazily created on first use;
+     * calling setenv()+tzset() here forces creation in safe task context.
+     * See: https://github.com/espressif/esp-idf/issues/11674 */
+    setenv("TZ", "UTC0", 1);
+    tzset();
+
     /* Step 1: Initialize NVS + params */
     init_nvs();
     ESP_LOGI(TAG, "Initializing parameter system...");
