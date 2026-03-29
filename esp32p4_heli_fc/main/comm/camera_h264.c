@@ -221,18 +221,24 @@ static bool IRAM_ATTR on_trans_finished(esp_cam_ctlr_handle_t handle,
 
 static esp_err_t sensor_init(void)
 {
-    i2c_master_bus_config_t i2c_bus_conf = {
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .sda_io_num = CAM_SCCB_SDA_IO,
-        .scl_io_num = CAM_SCCB_SCL_IO,
-        .i2c_port = I2C_NUM_0,
-        .flags.enable_internal_pullup = true,
-    };
+    /* Try to get existing I2C bus first (sensor_agent may have already created it),
+     * fall back to creating a new one if not yet initialized */
     i2c_master_bus_handle_t i2c_bus_handle = NULL;
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_bus_conf, &i2c_bus_handle),
-                        TAG, "I2C bus init failed");
-
-    ESP_LOGI(TAG, "SCCB I2C bus created (SCL=%d, SDA=%d)", CAM_SCCB_SCL_IO, CAM_SCCB_SDA_IO);
+    esp_err_t bus_err = i2c_master_get_bus_handle(I2C_NUM_0, &i2c_bus_handle);
+    if (bus_err != ESP_OK || i2c_bus_handle == NULL) {
+        i2c_master_bus_config_t i2c_bus_conf = {
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .sda_io_num = CAM_SCCB_SDA_IO,
+            .scl_io_num = CAM_SCCB_SCL_IO,
+            .i2c_port = I2C_NUM_0,
+            .flags.enable_internal_pullup = true,
+        };
+        ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_bus_conf, &i2c_bus_handle),
+                            TAG, "I2C bus init failed");
+        ESP_LOGI(TAG, "SCCB I2C bus created (SCL=%d, SDA=%d)", CAM_SCCB_SCL_IO, CAM_SCCB_SDA_IO);
+    } else {
+        ESP_LOGI(TAG, "Reusing existing I2C bus for camera SCCB");
+    }
 
     esp_sccb_io_handle_t sccb_io_handle = NULL;
     esp_cam_sensor_config_t cam_config = {
