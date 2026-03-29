@@ -1,6 +1,5 @@
 #pragma once
 
-#include "driver/spi_master.h"
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
 #include "esp_adc/adc_oneshot.h"
@@ -18,13 +17,8 @@
  * Spare: GPIO 28, 29, 30
  */
 
-/* ── IMU (ISM330DHC) - SPI3 ──────────────────────────────────── */
-#define PIN_IMU_SPI_SCK     25
-#define PIN_IMU_SPI_MOSI    26
-#define PIN_IMU_SPI_MISO    27
-#define PIN_IMU_SPI_CS      24
-#define IMU_SPI_HOST        SPI3_HOST
-#define IMU_SPI_FREQ_HZ     8000000   /* 8 MHz (ISM330DHC max 10 MHz) */
+/* ── IMU (ISM330DHC) - I2C ───────────────────────────────────── */
+#define ISM330DHC_I2C_ADDR  0x6A      /* SDO/SA0 = GND */
 
 /* ── I2C0 (Baro + Mag + MPRLS + Camera SCCB) ────────────────── */
 #define PIN_I2C_SDA         7

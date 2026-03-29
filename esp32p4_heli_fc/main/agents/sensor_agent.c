@@ -20,7 +20,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "driver/spi_master.h"
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
 
@@ -79,25 +78,6 @@ static bool  s_imu_filt_initialized = false;
 #define IMU_GYRO_FILTER_ALPHA  0.9f
 
 /* ------------------------------------------------------------------ */
-static int init_spi_bus(void)
-{
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = PIN_IMU_SPI_MOSI,
-        .miso_io_num = PIN_IMU_SPI_MISO,
-        .sclk_io_num = PIN_IMU_SPI_SCK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 64,
-    };
-    esp_err_t err = spi_bus_initialize(IMU_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
-        return -1;
-    }
-    ESP_LOGI(TAG, "SPI bus initialized");
-    return 0;
-}
-
 static i2c_master_bus_handle_t init_i2c_bus(void)
 {
     i2c_master_bus_config_t bus_cfg = {
@@ -124,13 +104,7 @@ static void sensor_task(void *param)
 {
     (void)param;
 
-    /* ---- Initialize buses ---- */
-    if (init_spi_bus() != 0) {
-        ESP_LOGE(TAG, "SPI init failed, task aborting");
-        vTaskDelete(NULL);
-        return;
-    }
-
+    /* ---- Initialize I2C bus ---- */
     i2c_master_bus_handle_t i2c_bus = init_i2c_bus();
     if (!i2c_bus) {
         ESP_LOGE(TAG, "I2C init failed, task aborting");
@@ -139,7 +113,7 @@ static void sensor_task(void *param)
     }
 
     /* ---- Initialize sensors ---- */
-    bool imu_ok = (ism330dhc_init(&s_imu, IMU_SPI_HOST, PIN_IMU_SPI_CS) == 0);
+    bool imu_ok = (ism330dhc_init(&s_imu, i2c_bus, ISM330DHC_I2C_ADDR) == 0);
     if (imu_ok) {
         imu_ok = (ism330dhc_configure(&s_imu) == 0);
     }
