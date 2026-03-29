@@ -21,6 +21,7 @@
 #include "mavlink/mavlink_msg.h"
 #include "../rpc/rpc_messages.h"
 #include "../common/flight_modes.h"
+#include "../agents/mission_mgr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -77,8 +78,7 @@ typedef enum {
     MISSION_STATE_DOWNLOADING,
 } mission_state_t;
 
-#define MISSION_MAX_LOCAL 50
-static mavlink_mission_item_int_t s_mission_items[MISSION_MAX_LOCAL];
+static mavlink_mission_item_int_t s_mission_items[MISSION_MAX_ITEMS]; /* from mission_mgr.h */
 static uint16_t s_mission_count = 0;
 static uint16_t s_mission_expected = 0;
 static uint16_t s_mission_received = 0;
@@ -120,6 +120,10 @@ static bool rate_check(uint32_t *last_ms, uint8_t hz)
     }
     return false;
 }
+
+/* Forward declarations */
+static void send_mission_current(void);
+static void send_autopilot_version(void);
 
 static void send_mavlink_msg(mavlink_message_t *msg)
 {
@@ -805,8 +809,8 @@ static void handle_mission_count(const mavlink_message_t *msg)
     s_mission_gcs_sysid = msg->sysid;
     s_mission_gcs_compid = msg->compid;
 
-    if (count > MISSION_MAX_LOCAL) {
-        ESP_LOGW(TAG, "MISSION_COUNT: %u exceeds max %d", count, MISSION_MAX_LOCAL);
+    if (count > MISSION_MAX_ITEMS) {
+        ESP_LOGW(TAG, "MISSION_COUNT: %u exceeds max %d", count, MISSION_MAX_ITEMS);
         mavlink_message_t ack;
         mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
                                        MAV_MISSION_NO_SPACE, MAV_MISSION_TYPE_MISSION);
@@ -847,7 +851,7 @@ static void handle_mission_item_int(const mavlink_message_t *msg)
         return;
     }
 
-    if (item.seq >= MISSION_MAX_LOCAL) {
+    if (item.seq >= MISSION_MAX_ITEMS) {
         ESP_LOGW(TAG, "MISSION_ITEM_INT: seq %u out of range", item.seq);
         return;
     }

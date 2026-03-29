@@ -1,10 +1,10 @@
 /*
  * ESP32-P4 Helicopter Flight Controller - Main Entry Point
  *
- * Initialization order (matching reference esp32p4halow):
- *   1. NVS, params, uORB, RPC
- *   2. Wi-Fi HaLow init (MUST run from app_main / Core 0)
- *   3. FC agents on Core 0
+ * Initialization order:
+ *   1. NVS, params, uORB, RPC, I2C sync
+ *   2. FC agents on Core 0 (sensors work without WiFi)
+ *   3. Wi-Fi HaLow init (MUST run from app_main / Core 0)
  *   4. Comm tasks (camera, MAVLink) on Core 1
  */
 
@@ -98,23 +98,28 @@ void app_main(void)
     /* Step 3: I2C bus synchronization init */
     i2c_sync_init();
 
-    /* Step 4: Wi-Fi HaLow init — MUST run from app_main (Core 0)
-     * This matches the reference esp32p4halow example exactly.
-     * morselib creates internal tasks that expect Core 0 context. */
+    /* Step 4: Start FC agents on Core 0 FIRST — sensors must work
+     * independently of HaLow WiFi link status. */
+    sensor_agent_start();     /* IMU, baro, GPS, airspeed on I2C */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    sysmon_agent_start(&g_rpc_ctx);  /* System monitor + RPC telemetry forwarding */
+    flight_ctrl_agent_start();
+    actuator_agent_start();
+
+    ESP_LOGI(TAG, "FC agents started. Free heap: %lu bytes",
+             (unsigned long)esp_get_free_heap_size());
+
+    /* Step 5: Wi-Fi HaLow init — MUST run from app_main (Core 0).
+     * morselib creates internal tasks that expect Core 0 context.
+     * If HaLow hardware is absent this may block, but FC agents
+     * are already running and will continue operating without GCS. */
     halow_comm_init_wlan();
 
     ESP_LOGI(TAG, "Internal RAM free after HaLow: %lu bytes",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-    /* Step 5: Start comm tasks (camera, MAVLink) on Core 1 */
+    /* Step 6: Start comm tasks (camera, MAVLink) on Core 1 */
     halow_comm_start(&g_rpc_ctx);
-
-    /* Step 6: Start FC agents on Core 0 */
-    sensor_agent_start();     /* IMU, baro, GPS, airspeed */
-    vTaskDelay(pdMS_TO_TICKS(100));
-    sysmon_agent_start(&g_rpc_ctx);  /* System monitor + RPC telemetry forwarding */
-    flight_ctrl_agent_start();
-    actuator_agent_start();
 
     ESP_LOGI(TAG, "Init complete. Free heap: %lu bytes",
              (unsigned long)esp_get_free_heap_size());
