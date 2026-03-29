@@ -103,11 +103,9 @@ void app_main(void)
     /* Step 4: Start comm tasks (camera, MAVLink) on Core 1 */
     halow_comm_start(&g_rpc_ctx);
 
-    /* Step 5: Start FC agents on Core 0
-     * (temporarily disabled for HaLow-only testing)
-     */
-#if 0  /* Re-enable once HaLow runs stable */
-    sensor_agent_start();
+    /* Step 5: Start FC agents on Core 0 */
+    sensor_agent_start();     /* IMU, baro, GPS, airspeed */
+#if 0  /* Re-enable once sensors are verified */
     vTaskDelay(pdMS_TO_TICKS(100));
     flight_ctrl_agent_start();
     actuator_agent_start();
