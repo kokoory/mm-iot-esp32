@@ -517,9 +517,13 @@ esp_err_t camera_h264_init(void)
     }
     ESP_LOGI(TAG, "MIPI PHY LDO enabled (channel %d, %dmV)", MIPI_LDO_CHAN_ID, MIPI_LDO_VOLTAGE_MV);
 
+    /* Wait for sensor_agent I2C init to complete before using SCCB */
+    ESP_LOGI(TAG, "Waiting for sensor I2C init to complete...");
+    i2c_sync_wait_sensors();
+    ESP_LOGI(TAG, "Sensor init done, starting camera SCCB");
+
     /* Camera sensor init (SCCB/I2C) */
     ret = sensor_init();
-    i2c_sync_camera_done();  /* Signal sensor_agent that SCCB is done */
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Camera sensor init failed: %s", esp_err_to_name(ret));
         return ret;

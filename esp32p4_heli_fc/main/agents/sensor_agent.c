@@ -113,12 +113,7 @@ static void sensor_task(void *param)
         return;
     }
 
-    /* Wait for camera SCCB init to finish before using I2C bus */
-    ESP_LOGI(TAG, "Waiting for camera SCCB init to complete...");
-    i2c_sync_wait_camera();
-    ESP_LOGI(TAG, "Camera SCCB done, starting sensor init");
-
-    /* ---- Initialize sensors ---- */
+    /* ---- Initialize sensors (exclusive I2C access) ---- */
     bool imu_ok = (ism330dhc_init(&s_imu, i2c_bus, ISM330DHC_I2C_ADDR) == 0);
     if (imu_ok) {
         imu_ok = (ism330dhc_configure(&s_imu) == 0);
@@ -149,22 +144,6 @@ static void sensor_task(void *param)
         ESP_LOGE(TAG, "Mag init/configure FAILED");
     }
 
-    /* GPS init (starts its own internal UART parser task) */
-    bool gps_ok = (gps_init(&s_gps, GPS_UART_NUM, PIN_GPS_TX, PIN_GPS_RX, GPS_BAUD_RATE) == 0);
-    if (gps_ok) {
-        ESP_LOGI(TAG, "GPS UART initialized");
-    } else {
-        ESP_LOGE(TAG, "GPS init FAILED");
-    }
-
-    /* SBUS RC receiver init */
-    bool sbus_ok = (sbus_init() == 0);
-    if (sbus_ok) {
-        ESP_LOGI(TAG, "SBUS receiver initialized");
-    } else {
-        ESP_LOGE(TAG, "SBUS init FAILED");
-    }
-
     /* MPRLS differential pressure sensor (pitot tube airspeed) */
     bool mprls_ok = (mprls_init(&s_mprls, i2c_bus, MPRLS_I2C_ADDR) == 0);
     if (mprls_ok) {
@@ -172,6 +151,12 @@ static void sensor_task(void *param)
     } else {
         ESP_LOGW(TAG, "MPRLS init FAILED (airspeed unavailable)");
     }
+
+    /* Signal camera that I2C sensor init is complete — safe to use SCCB now */
+    ESP_LOGI(TAG, "I2C sensor init complete, releasing bus for camera SCCB");
+    i2c_sync_sensors_done();
+
+    /* GPS init (starts its own internal UART parser task) */
 
     /* ---- Initialize estimators ---- */
     ahrs_init(&s_ahrs, param_get(PARAM_AHRS_BETA));
