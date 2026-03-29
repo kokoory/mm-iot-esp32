@@ -112,6 +112,16 @@ static void sensor_task(void *param)
         return;
     }
 
+    /* ---- I2C bus scan (debug) ---- */
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        esp_err_t probe_ret = i2c_master_probe(i2c_bus, addr, 50);
+        if (probe_ret == ESP_OK) {
+            ESP_LOGI(TAG, "  I2C device found at 0x%02X", addr);
+        }
+    }
+    ESP_LOGI(TAG, "I2C scan complete");
+
     /* ---- Initialize sensors ---- */
     bool imu_ok = (ism330dhc_init(&s_imu, i2c_bus, ISM330DHC_I2C_ADDR) == 0);
     if (imu_ok) {
