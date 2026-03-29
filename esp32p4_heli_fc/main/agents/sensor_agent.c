@@ -24,6 +24,7 @@
 #include "driver/gpio.h"
 
 #include "../common/board_config.h"
+#include "../common/i2c_sync.h"
 #include "../common/math_utils.h"
 #include "../uorb/uorb.h"
 #include "../uorb/topics/sensor_imu.h"
@@ -112,15 +113,10 @@ static void sensor_task(void *param)
         return;
     }
 
-    /* ---- I2C bus scan (debug) ---- */
-    ESP_LOGI(TAG, "Scanning I2C bus...");
-    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        esp_err_t probe_ret = i2c_master_probe(i2c_bus, addr, 50);
-        if (probe_ret == ESP_OK) {
-            ESP_LOGI(TAG, "  I2C device found at 0x%02X", addr);
-        }
-    }
-    ESP_LOGI(TAG, "I2C scan complete");
+    /* Wait for camera SCCB init to finish before using I2C bus */
+    ESP_LOGI(TAG, "Waiting for camera SCCB init to complete...");
+    i2c_sync_wait_camera();
+    ESP_LOGI(TAG, "Camera SCCB done, starting sensor init");
 
     /* ---- Initialize sensors ---- */
     bool imu_ok = (ism330dhc_init(&s_imu, i2c_bus, ISM330DHC_I2C_ADDR) == 0);

@@ -30,6 +30,9 @@
 #include "agents/actuator_agent.h"
 #include "agents/sysmon_agent.h"
 #include "comm/halow_comm.h"
+#include "common/i2c_sync.h"
+
+EventGroupHandle_t g_i2c_sync_event;
 
 static const char *TAG = "HELI_FC";
 
@@ -92,7 +95,10 @@ void app_main(void)
     orb_init();
     rpc_init(&g_rpc_ctx);
 
-    /* Step 3: Wi-Fi HaLow init — MUST run from app_main (Core 0)
+    /* Step 3: I2C bus synchronization init */
+    i2c_sync_init();
+
+    /* Step 4: Wi-Fi HaLow init — MUST run from app_main (Core 0)
      * This matches the reference esp32p4halow example exactly.
      * morselib creates internal tasks that expect Core 0 context. */
     halow_comm_init_wlan();
@@ -100,10 +106,10 @@ void app_main(void)
     ESP_LOGI(TAG, "Internal RAM free after HaLow: %lu bytes",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-    /* Step 4: Start comm tasks (camera, MAVLink) on Core 1 */
+    /* Step 5: Start comm tasks (camera, MAVLink) on Core 1 */
     halow_comm_start(&g_rpc_ctx);
 
-    /* Step 5: Start FC agents on Core 0 */
+    /* Step 6: Start FC agents on Core 0 */
     sensor_agent_start();     /* IMU, baro, GPS, airspeed */
     vTaskDelay(pdMS_TO_TICKS(100));
     sysmon_agent_start(&g_rpc_ctx);  /* System monitor + RPC telemetry forwarding */

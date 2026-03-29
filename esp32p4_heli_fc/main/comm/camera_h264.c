@@ -32,6 +32,7 @@
 #include "esp_netif.h"
 
 #include "camera_h264.h"
+#include "../common/i2c_sync.h"
 
 static const char *TAG = "camera_h264";
 
@@ -516,8 +517,9 @@ esp_err_t camera_h264_init(void)
     }
     ESP_LOGI(TAG, "MIPI PHY LDO enabled (channel %d, %dmV)", MIPI_LDO_CHAN_ID, MIPI_LDO_VOLTAGE_MV);
 
-    /* Camera sensor init */
+    /* Camera sensor init (SCCB/I2C) */
     ret = sensor_init();
+    i2c_sync_camera_done();  /* Signal sensor_agent that SCCB is done */
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Camera sensor init failed: %s", esp_err_to_name(ret));
         return ret;
