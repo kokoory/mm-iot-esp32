@@ -47,6 +47,11 @@ uint8_t mavlink_get_crc_extra(uint32_t msgid)
     case MAVLINK_MSG_ID_AUTOPILOT_VERSION:   return 178;
     case MAVLINK_MSG_ID_HOME_POSITION:       return 104;
     case MAVLINK_MSG_ID_EXTENDED_SYS_STATE:  return 130;
+    case MAVLINK_MSG_ID_VIBRATION:           return 90;
+    case MAVLINK_MSG_ID_ESTIMATOR_STATUS:    return 163;
+    case MAVLINK_MSG_ID_HIGHRES_IMU:         return 93;
+    case MAVLINK_MSG_ID_LOCAL_POSITION_NED:  return 185;
+    case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL: return 84;
     default:                                 return 0;
     }
 }
@@ -1136,4 +1141,186 @@ void mavlink_msg_mission_current_encode(mavlink_message_t *msg, uint16_t seq)
     msg->len = 2;
     put_u16(msg->payload, 0, seq);
     mavlink_finalize(msg);
+}
+
+/* ── Vibration (ID 241) ──────────────────────────────────────── *
+ * Payload layout (32 bytes):
+ *   0-7:   time_usec (uint64)
+ *   8-11:  vibration_x (float)
+ *   12-15: vibration_y (float)
+ *   16-19: vibration_z (float)
+ *   20-23: clipping_0 (uint32)
+ *   24-27: clipping_1 (uint32)
+ *   28-31: clipping_2 (uint32)
+ */
+void mavlink_msg_vibration_encode(mavlink_message_t *msg,
+                                  uint64_t time_usec,
+                                  float vibration_x, float vibration_y, float vibration_z,
+                                  uint32_t clipping_0, uint32_t clipping_1, uint32_t clipping_2)
+{
+    msg_init(msg, MAVLINK_MSG_ID_VIBRATION);
+    msg->len = 32;
+    put_u64(msg->payload, 0, time_usec);
+    put_float(msg->payload, 8, vibration_x);
+    put_float(msg->payload, 12, vibration_y);
+    put_float(msg->payload, 16, vibration_z);
+    put_u32(msg->payload, 20, clipping_0);
+    put_u32(msg->payload, 24, clipping_1);
+    put_u32(msg->payload, 28, clipping_2);
+    mavlink_finalize(msg);
+}
+
+/* ── Estimator Status (ID 230) ───────────────────────────────── *
+ * Payload layout (42 bytes):
+ *   0-7:   time_usec (uint64)
+ *   8-11:  vel_ratio (float)
+ *   12-15: pos_horiz_ratio (float)
+ *   16-19: pos_vert_ratio (float)
+ *   20-23: mag_ratio (float)
+ *   24-27: hagl_ratio (float)
+ *   28-31: tas_ratio (float)
+ *   32-35: pos_horiz_accuracy (float)
+ *   36-39: pos_vert_accuracy (float)
+ *   40-41: flags (uint16)
+ */
+void mavlink_msg_estimator_status_encode(mavlink_message_t *msg,
+                                         uint64_t time_usec,
+                                         uint16_t flags,
+                                         float vel_ratio, float pos_horiz_ratio,
+                                         float pos_vert_ratio, float mag_ratio,
+                                         float hagl_ratio, float tas_ratio,
+                                         float pos_horiz_accuracy, float pos_vert_accuracy)
+{
+    msg_init(msg, MAVLINK_MSG_ID_ESTIMATOR_STATUS);
+    msg->len = 42;
+    memset(msg->payload, 0, 42);
+    put_u64(msg->payload, 0, time_usec);
+    put_float(msg->payload, 8, vel_ratio);
+    put_float(msg->payload, 12, pos_horiz_ratio);
+    put_float(msg->payload, 16, pos_vert_ratio);
+    put_float(msg->payload, 20, mag_ratio);
+    put_float(msg->payload, 24, hagl_ratio);
+    put_float(msg->payload, 28, tas_ratio);
+    put_float(msg->payload, 32, pos_horiz_accuracy);
+    put_float(msg->payload, 36, pos_vert_accuracy);
+    put_u16(msg->payload, 40, flags);
+    mavlink_finalize(msg);
+}
+
+/* ── HIGHRES_IMU (ID 105) ────────────────────────────────────── *
+ * Payload layout (62 bytes):
+ *   0-7:   time_usec (uint64)
+ *   8-11:  xacc (float)
+ *   12-15: yacc (float)
+ *   16-19: zacc (float)
+ *   20-23: xgyro (float)
+ *   24-27: ygyro (float)
+ *   28-31: zgyro (float)
+ *   32-35: xmag (float)
+ *   36-39: ymag (float)
+ *   40-43: zmag (float)
+ *   44-47: abs_pressure (float, mbar)
+ *   48-51: diff_pressure (float, mbar)
+ *   52-55: pressure_alt (float, m)
+ *   56-59: temperature (float, degC)
+ *   60-61: fields_updated (uint16, bitmask)
+ */
+void mavlink_msg_highres_imu_encode(mavlink_message_t *msg,
+                                    uint64_t time_usec,
+                                    float xacc, float yacc, float zacc,
+                                    float xgyro, float ygyro, float zgyro,
+                                    float xmag, float ymag, float zmag,
+                                    float abs_pressure, float diff_pressure,
+                                    float pressure_alt, float temperature,
+                                    uint16_t fields_updated)
+{
+    msg_init(msg, MAVLINK_MSG_ID_HIGHRES_IMU);
+    msg->len = 62;
+    memset(msg->payload, 0, 62);
+    put_u64(msg->payload, 0, time_usec);
+    put_float(msg->payload, 8, xacc);
+    put_float(msg->payload, 12, yacc);
+    put_float(msg->payload, 16, zacc);
+    put_float(msg->payload, 20, xgyro);
+    put_float(msg->payload, 24, ygyro);
+    put_float(msg->payload, 28, zgyro);
+    put_float(msg->payload, 32, xmag);
+    put_float(msg->payload, 36, ymag);
+    put_float(msg->payload, 40, zmag);
+    put_float(msg->payload, 44, abs_pressure);
+    put_float(msg->payload, 48, diff_pressure);
+    put_float(msg->payload, 52, pressure_alt);
+    put_float(msg->payload, 56, temperature);
+    put_u16(msg->payload, 60, fields_updated);
+    mavlink_finalize(msg);
+}
+
+/* ── Local Position NED (ID 32) ──────────────────────────────── *
+ * Payload layout (28 bytes):
+ *   0-3:   time_boot_ms (uint32)
+ *   4-7:   x (float, m North)
+ *   8-11:  y (float, m East)
+ *   12-15: z (float, m Down)
+ *   16-19: vx (float, m/s)
+ *   20-23: vy (float, m/s)
+ *   24-27: vz (float, m/s)
+ */
+void mavlink_msg_local_position_ned_encode(mavlink_message_t *msg,
+                                           uint32_t time_boot_ms,
+                                           float x, float y, float z,
+                                           float vx, float vy, float vz)
+{
+    msg_init(msg, MAVLINK_MSG_ID_LOCAL_POSITION_NED);
+    msg->len = 28;
+    put_u32(msg->payload, 0, time_boot_ms);
+    put_float(msg->payload, 4, x);
+    put_float(msg->payload, 8, y);
+    put_float(msg->payload, 12, z);
+    put_float(msg->payload, 16, vx);
+    put_float(msg->payload, 20, vy);
+    put_float(msg->payload, 24, vz);
+    mavlink_finalize(msg);
+}
+
+/* ── File Transfer Protocol (ID 110) ─────────────────────────── *
+ * Payload layout (254 bytes):
+ *   0:     target_network (uint8)
+ *   1:     target_system (uint8)
+ *   2:     target_component (uint8)
+ *   3-253: payload (uint8[251])
+ */
+void mavlink_msg_file_transfer_protocol_encode(mavlink_message_t *msg,
+                                               uint8_t target_network,
+                                               uint8_t target_system,
+                                               uint8_t target_component,
+                                               const uint8_t *payload, uint8_t payload_len)
+{
+    msg_init(msg, MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL);
+    msg->len = 3 + payload_len;
+    if (msg->len > 254) msg->len = 254;
+    memset(msg->payload, 0, msg->len);
+    put_u8(msg->payload, 0, target_network);
+    put_u8(msg->payload, 1, target_system);
+    put_u8(msg->payload, 2, target_component);
+    if (payload && payload_len > 0) {
+        uint8_t copy_len = (payload_len > 251) ? 251 : payload_len;
+        memcpy(&msg->payload[3], payload, copy_len);
+    }
+    mavlink_finalize(msg);
+}
+
+void mavlink_msg_file_transfer_protocol_decode(const mavlink_message_t *msg,
+                                               uint8_t *target_network,
+                                               uint8_t *target_system,
+                                               uint8_t *target_component,
+                                               uint8_t *payload, uint8_t *payload_len)
+{
+    if (target_network) *target_network = get_u8(msg->payload, 0);
+    if (target_system) *target_system = get_u8(msg->payload, 1);
+    if (target_component) *target_component = get_u8(msg->payload, 2);
+    uint8_t plen = (msg->len > 3) ? (msg->len - 3) : 0;
+    if (payload_len) *payload_len = plen;
+    if (payload && plen > 0) {
+        memcpy(payload, &msg->payload[3], plen);
+    }
 }

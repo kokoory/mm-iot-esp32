@@ -24,6 +24,10 @@ enum {
     RPC_MSG_MISSION_ITEM  = 0x0D,
     RPC_MSG_MISSION_ACK   = 0x0E,
     RPC_MSG_MISSION_CURRENT = 0x0F,
+    RPC_MSG_IMU_RAW         = 0x10,
+    RPC_MSG_ESTIMATOR       = 0x11,
+    RPC_MSG_MAG_RAW         = 0x12,
+    RPC_MSG_BARO_RAW        = 0x13,
 };
 
 /* Message types: Core 1 -> Core 0 (commands) */
@@ -133,6 +137,31 @@ typedef struct {
             uint8_t severity;       /* MAV_SEVERITY */
             char    text[50];
         } statustext;
+
+        struct {
+            float accel_x, accel_y, accel_z;    /* m/s^2 */
+            float gyro_x, gyro_y, gyro_z;       /* rad/s */
+            float temperature;                   /* degC */
+        } imu_raw;
+
+        struct {
+            uint16_t flags;                 /* ESTIMATOR_STATUS_FLAGS */
+            float    vel_ratio;
+            float    pos_horiz_ratio;
+            float    pos_vert_ratio;
+            float    pos_horiz_accuracy;    /* meters */
+            float    pos_vert_accuracy;     /* meters */
+        } estimator;
+
+        struct {
+            float x, y, z;                 /* Gauss */
+        } mag_raw;
+
+        struct {
+            float pressure;                /* Pa */
+            float temperature;             /* degC */
+            float altitude;                /* meters */
+        } baro_raw;
     } data;
 } rpc_telemetry_msg_t;
 

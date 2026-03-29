@@ -285,18 +285,24 @@ static void sysmon_task(void *param)
         /* Save GPS data for reuse in RPC forwarding (avoid double-consume) */
         sensor_gps_t gps_data;
         bool gps_updated = false;
+        sensor_imu_t imu_data;
+        bool imu_updated = false;
+        sensor_baro_t baro_data;
+        bool baro_updated = false;
+        sensor_mag_t mag_data;
+        bool mag_updated = false;
         {
-            sensor_imu_t imu;
-            if (orb_copy(imu_sub, &imu) == 0) {
-                last_imu_ts = imu.timestamp_us;
+            if (orb_copy(imu_sub, &imu_data) == 0) {
+                last_imu_ts = imu_data.timestamp_us;
+                imu_updated = true;
             }
-            sensor_baro_t baro;
-            if (orb_copy(baro_sub, &baro) == 0) {
-                last_baro_ts = baro.timestamp_us;
+            if (orb_copy(baro_sub, &baro_data) == 0) {
+                last_baro_ts = baro_data.timestamp_us;
+                baro_updated = true;
             }
-            sensor_mag_t mag;
-            if (orb_copy(mag_sub, &mag) == 0) {
-                last_mag_ts = mag.timestamp_us;
+            if (orb_copy(mag_sub, &mag_data) == 0) {
+                last_mag_ts = mag_data.timestamp_us;
+                mag_updated = true;
             }
             if (orb_copy(gps_sub, &gps_data) == 0) {
                 last_gps_ts = gps_data.timestamp_us;
@@ -811,6 +817,33 @@ static void sysmon_task(void *param)
 
             /* Vehicle status */
             rpc_telem_send_status(rpc, &status_msg);
+
+            /* Raw sensor data for HIGHRES_IMU and VIBRATION */
+            if (imu_updated) {
+                rpc_telem_send_imu_raw(rpc, &imu_data);
+            }
+            if (mag_updated) {
+                rpc_telem_send_mag_raw(rpc, &mag_data);
+            }
+            if (baro_updated) {
+                rpc_telem_send_baro_raw(rpc, &baro_data);
+            }
+
+            /* Estimator status (construct from sensor health) */
+            {
+                uint16_t est_flags = 0;
+                if (imu_ok)  est_flags |= (1 << 0) | (1 << 1) | (1 << 2); /* attitude + vel */
+                if (gps_ok)  est_flags |= (1 << 3) | (1 << 4) | (1 << 5); /* pos horiz/vert */
+                if (baro_ok) est_flags |= (1 << 6); /* AGL */
+                if (gps_ok)  est_flags |= (1 << 10) | (1 << 11); /* pred pos */
+                float h_acc = gps_ok ? gps_data.hdop * 0.5f : 999.0f;
+                float v_acc = baro_ok ? 1.0f : 999.0f;
+                rpc_telem_send_estimator(rpc, est_flags,
+                    imu_ok ? 1.0f : 0.0f,   /* vel_ratio */
+                    gps_ok ? 1.0f : 0.0f,   /* pos_horiz_ratio */
+                    baro_ok ? 1.0f : 0.0f,  /* pos_vert_ratio */
+                    h_acc, v_acc);
+            }
 
             /* Periodic MISSION_CURRENT when in mission mode */
             if (flight_mode == FLIGHT_MODE_MISSION &&

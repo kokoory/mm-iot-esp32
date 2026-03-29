@@ -117,3 +117,74 @@ int rpc_telem_send_status(rpc_context_t *ctx, const vehicle_status_t *status)
 
     return rpc_send_telemetry(ctx, &msg);
 }
+
+int rpc_telem_send_imu_raw(rpc_context_t *ctx, const sensor_imu_t *imu)
+{
+    if (ctx == NULL || imu == NULL) return -1;
+
+    rpc_telemetry_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = RPC_MSG_IMU_RAW;
+    msg.timestamp_ms = get_time_ms();
+    msg.data.imu_raw.accel_x = imu->accel_x;
+    msg.data.imu_raw.accel_y = imu->accel_y;
+    msg.data.imu_raw.accel_z = imu->accel_z;
+    msg.data.imu_raw.gyro_x  = imu->gyro_x;
+    msg.data.imu_raw.gyro_y  = imu->gyro_y;
+    msg.data.imu_raw.gyro_z  = imu->gyro_z;
+    msg.data.imu_raw.temperature = imu->temperature;
+
+    return rpc_send_telemetry(ctx, &msg);
+}
+
+int rpc_telem_send_mag_raw(rpc_context_t *ctx, const sensor_mag_t *mag)
+{
+    if (ctx == NULL || mag == NULL) return -1;
+
+    rpc_telemetry_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = RPC_MSG_MAG_RAW;
+    msg.timestamp_ms = get_time_ms();
+    msg.data.mag_raw.x = mag->mag_x;
+    msg.data.mag_raw.y = mag->mag_y;
+    msg.data.mag_raw.z = mag->mag_z;
+
+    return rpc_send_telemetry(ctx, &msg);
+}
+
+int rpc_telem_send_baro_raw(rpc_context_t *ctx, const sensor_baro_t *baro)
+{
+    if (ctx == NULL || baro == NULL) return -1;
+
+    rpc_telemetry_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = RPC_MSG_BARO_RAW;
+    msg.timestamp_ms = get_time_ms();
+    msg.data.baro_raw.pressure    = baro->pressure_pa;
+    msg.data.baro_raw.temperature = baro->temperature;
+    msg.data.baro_raw.altitude    = baro->altitude_msl;
+
+    return rpc_send_telemetry(ctx, &msg);
+}
+
+int rpc_telem_send_estimator(rpc_context_t *ctx,
+                             uint16_t flags,
+                             float vel_ratio, float pos_horiz_ratio,
+                             float pos_vert_ratio,
+                             float pos_horiz_accuracy, float pos_vert_accuracy)
+{
+    if (ctx == NULL) return -1;
+
+    rpc_telemetry_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = RPC_MSG_ESTIMATOR;
+    msg.timestamp_ms = get_time_ms();
+    msg.data.estimator.flags              = flags;
+    msg.data.estimator.vel_ratio          = vel_ratio;
+    msg.data.estimator.pos_horiz_ratio    = pos_horiz_ratio;
+    msg.data.estimator.pos_vert_ratio     = pos_vert_ratio;
+    msg.data.estimator.pos_horiz_accuracy = pos_horiz_accuracy;
+    msg.data.estimator.pos_vert_accuracy  = pos_vert_accuracy;
+
+    return rpc_send_telemetry(ctx, &msg);
+}

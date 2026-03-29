@@ -96,6 +96,52 @@ static uint32_t s_last_vfr_hud_ms   = 0;
 static uint32_t s_last_servo_ms     = 0;
 static uint32_t s_last_ext_state_ms = 0;
 static uint32_t s_last_home_ms      = 0;
+static uint32_t s_last_estimator_ms = 0;
+static uint32_t s_last_vibration_ms = 0;
+static uint32_t s_last_highres_ms   = 0;
+
+/* IMU raw cache for HIGHRES_IMU and VIBRATION */
+static bool s_has_imu_raw = false;
+static rpc_telemetry_msg_t s_latest_imu_raw;
+static float s_vib_accel_x_sq = 0.0f;  /* running sum of squares for vibration RMS */
+static float s_vib_accel_y_sq = 0.0f;
+static float s_vib_accel_z_sq = 0.0f;
+static uint32_t s_vib_sample_count = 0;
+static uint32_t s_vib_clip[3] = {0, 0, 0}; /* clipping counters per axis */
+#define VIB_CLIP_THRESHOLD 15.0f /* m/s^2, ~1.5g */
+
+/* Estimator cache */
+static bool s_has_estimator = false;
+static rpc_telemetry_msg_t s_latest_estimator;
+
+/* Mag raw cache for HIGHRES_IMU */
+static bool s_has_mag_raw = false;
+static rpc_telemetry_msg_t s_latest_mag_raw;
+
+/* Baro raw cache for HIGHRES_IMU */
+static bool s_has_baro_raw = false;
+static rpc_telemetry_msg_t s_latest_baro_raw;
+
+/* Geofence/Rally storage */
+#define FENCE_MAX_ITEMS 20
+#define RALLY_MAX_ITEMS 10
+static mavlink_mission_item_int_t s_fence_items[FENCE_MAX_ITEMS];
+static uint16_t s_fence_count = 0;
+static mavlink_mission_item_int_t s_rally_items[RALLY_MAX_ITEMS];
+static uint16_t s_rally_count = 0;
+
+/* FTP state */
+#define FTP_OPCODE_NONE         0
+#define FTP_OPCODE_TERMINATE    1
+#define FTP_OPCODE_RESET        2
+#define FTP_OPCODE_LIST_DIR     3
+#define FTP_OPCODE_OPEN_FILE_RO 4
+#define FTP_OPCODE_READ_FILE    5
+#define FTP_OPCODE_ACK          128
+#define FTP_OPCODE_NAK          129
+#define FTP_ERR_FAIL            1
+#define FTP_ERR_FILENOTFOUND    6
+#define FTP_ERR_EOF             7
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
@@ -230,6 +276,35 @@ static void drain_rpc_telemetry(void)
         case RPC_MSG_MISSION_CURRENT:
             s_mission_current_seq = telem.data.mission_current.seq;
             send_mission_current();
+            break;
+        case RPC_MSG_IMU_RAW:
+            s_latest_imu_raw = telem;
+            s_has_imu_raw = true;
+            /* Accumulate vibration RMS data */
+            {
+                float ax = telem.data.imu_raw.accel_x;
+                float ay = telem.data.imu_raw.accel_y;
+                float az = telem.data.imu_raw.accel_z;
+                s_vib_accel_x_sq += ax * ax;
+                s_vib_accel_y_sq += ay * ay;
+                s_vib_accel_z_sq += az * az;
+                s_vib_sample_count++;
+                if (fabsf(ax) > VIB_CLIP_THRESHOLD) s_vib_clip[0]++;
+                if (fabsf(ay) > VIB_CLIP_THRESHOLD) s_vib_clip[1]++;
+                if (fabsf(az) > VIB_CLIP_THRESHOLD) s_vib_clip[2]++;
+            }
+            break;
+        case RPC_MSG_ESTIMATOR:
+            s_latest_estimator = telem;
+            s_has_estimator = true;
+            break;
+        case RPC_MSG_MAG_RAW:
+            s_latest_mag_raw = telem;
+            s_has_mag_raw = true;
+            break;
+        case RPC_MSG_BARO_RAW:
+            s_latest_baro_raw = telem;
+            s_has_baro_raw = true;
             break;
         default:
             ESP_LOGW(TAG, "Unknown RPC telem type: 0x%02x", telem.msg_type);
@@ -377,11 +452,17 @@ static void send_gps(void)
         int32_t alt_msl = (int32_t)(s_latest_altitude.data.altitude.alt_msl * 1000.0f);
         int32_t alt_rel = (int32_t)(s_latest_altitude.data.altitude.alt_rel * 1000.0f);
 
+        uint16_t hdg = 0xFFFF;
+        if (s_has_attitude) {
+            float yaw_deg = s_latest_attitude.data.attitude.yaw * 57.2957795f;
+            if (yaw_deg < 0.0f) yaw_deg += 360.0f;
+            hdg = (uint16_t)(yaw_deg * 100.0f); /* cdeg */
+        }
         mavlink_msg_global_position_int_encode(&msg,
             s_latest_gps.timestamp_ms,
             lat, lon, alt_msl, alt_rel,
             0, 0, 0, /* vx, vy, vz - not available from GPS alone */
-            0xFFFF); /* heading unknown */
+            hdg);
         send_mavlink_msg(&msg);
     }
 }
@@ -525,6 +606,97 @@ static void send_home_position(void)
     send_mavlink_msg(&msg);
 }
 
+static void send_vibration(void)
+{
+    if (!rate_check(&s_last_vibration_ms, 2)) { /* 2 Hz */
+        return;
+    }
+
+    float vib_x = 0.0f, vib_y = 0.0f, vib_z = 0.0f;
+    if (s_vib_sample_count > 0) {
+        vib_x = sqrtf(s_vib_accel_x_sq / (float)s_vib_sample_count);
+        vib_y = sqrtf(s_vib_accel_y_sq / (float)s_vib_sample_count);
+        vib_z = sqrtf(s_vib_accel_z_sq / (float)s_vib_sample_count);
+        /* Reset accumulators */
+        s_vib_accel_x_sq = 0.0f;
+        s_vib_accel_y_sq = 0.0f;
+        s_vib_accel_z_sq = 0.0f;
+        s_vib_sample_count = 0;
+    }
+
+    mavlink_message_t msg;
+    mavlink_msg_vibration_encode(&msg,
+        (uint64_t)get_time_ms() * 1000ULL,
+        vib_x, vib_y, vib_z,
+        s_vib_clip[0], s_vib_clip[1], s_vib_clip[2]);
+    send_mavlink_msg(&msg);
+}
+
+static void send_estimator_status(void)
+{
+    if (!s_has_estimator || !rate_check(&s_last_estimator_ms, 1)) { /* 1 Hz */
+        return;
+    }
+
+    mavlink_message_t msg;
+    mavlink_msg_estimator_status_encode(&msg,
+        (uint64_t)get_time_ms() * 1000ULL,
+        s_latest_estimator.data.estimator.flags,
+        s_latest_estimator.data.estimator.vel_ratio,
+        s_latest_estimator.data.estimator.pos_horiz_ratio,
+        s_latest_estimator.data.estimator.pos_vert_ratio,
+        0.0f, /* mag_ratio - not available */
+        0.0f, /* hagl_ratio - not available */
+        0.0f, /* tas_ratio - not available */
+        s_latest_estimator.data.estimator.pos_horiz_accuracy,
+        s_latest_estimator.data.estimator.pos_vert_accuracy);
+    send_mavlink_msg(&msg);
+}
+
+static void send_highres_imu(void)
+{
+    if (!s_has_imu_raw || !rate_check(&s_last_highres_ms, 10)) { /* 10 Hz */
+        return;
+    }
+
+    float xmag = 0.0f, ymag = 0.0f, zmag = 0.0f;
+    if (s_has_mag_raw) {
+        xmag = s_latest_mag_raw.data.mag_raw.x;
+        ymag = s_latest_mag_raw.data.mag_raw.y;
+        zmag = s_latest_mag_raw.data.mag_raw.z;
+    }
+
+    float abs_pressure = 0.0f, pressure_alt = 0.0f, temperature = 0.0f;
+    if (s_has_baro_raw) {
+        abs_pressure = s_latest_baro_raw.data.baro_raw.pressure / 100.0f; /* Pa -> hPa(mbar) */
+        pressure_alt = s_latest_baro_raw.data.baro_raw.altitude;
+        temperature = s_latest_baro_raw.data.baro_raw.temperature;
+    } else {
+        temperature = s_latest_imu_raw.data.imu_raw.temperature;
+    }
+
+    uint16_t fields = 0;
+    fields |= (1 << 0) | (1 << 1) | (1 << 2); /* accel */
+    fields |= (1 << 3) | (1 << 4) | (1 << 5); /* gyro */
+    if (s_has_mag_raw) fields |= (1 << 6) | (1 << 7) | (1 << 8); /* mag */
+    if (s_has_baro_raw) fields |= (1 << 9) | (1 << 11) | (1 << 12); /* pressure, alt, temp */
+
+    mavlink_message_t msg;
+    mavlink_msg_highres_imu_encode(&msg,
+        (uint64_t)get_time_ms() * 1000ULL,
+        s_latest_imu_raw.data.imu_raw.accel_x,
+        s_latest_imu_raw.data.imu_raw.accel_y,
+        s_latest_imu_raw.data.imu_raw.accel_z,
+        s_latest_imu_raw.data.imu_raw.gyro_x,
+        s_latest_imu_raw.data.imu_raw.gyro_y,
+        s_latest_imu_raw.data.imu_raw.gyro_z,
+        xmag, ymag, zmag,
+        abs_pressure, 0.0f, /* diff_pressure not available */
+        pressure_alt, temperature,
+        fields);
+    send_mavlink_msg(&msg);
+}
+
 static void send_mission_current(void)
 {
     mavlink_message_t msg;
@@ -536,8 +708,10 @@ static void send_autopilot_version(void)
 {
     uint64_t cap = MAV_PROTOCOL_CAPABILITY_MISSION_INT
                  | MAV_PROTOCOL_CAPABILITY_PARAM_FLOAT
-                 | MAV_PROTOCOL_CAPABILITY_SET_ATTITUDE_TARGET
-                 | MAV_PROTOCOL_CAPABILITY_MAVLINK2;
+                 | MAV_PROTOCOL_CAPABILITY_MAVLINK2
+                 | MAV_PROTOCOL_CAPABILITY_FTP
+                 | MAV_PROTOCOL_CAPABILITY_MISSION_FENCE
+                 | MAV_PROTOCOL_CAPABILITY_MISSION_RALLY;
 
     uint8_t custom_ver[8] = {0};
     mavlink_message_t msg;
@@ -562,6 +736,9 @@ static void send_telemetry(void)
     send_servo_output();
     send_extended_sys_state();
     send_home_position();
+    send_vibration();
+    send_estimator_status();
+    send_highres_imu();
     send_param_values();
     send_statustext_messages();
 }
@@ -784,6 +961,20 @@ static void handle_mission_request_list(const mavlink_message_t *msg)
     uint8_t target_system, target_component, mission_type;
     mavlink_msg_mission_request_list_decode(msg, &target_system, &target_component, &mission_type);
     if (target_system != 0 && target_system != MAV_SYS_ID) return;
+    if (mission_type == MAV_MISSION_TYPE_FENCE) {
+        mavlink_message_t reply;
+        mavlink_msg_mission_count_encode(&reply, msg->sysid, msg->compid,
+                                         s_fence_count, MAV_MISSION_TYPE_FENCE);
+        send_mavlink_msg(&reply);
+        return;
+    }
+    if (mission_type == MAV_MISSION_TYPE_RALLY) {
+        mavlink_message_t reply;
+        mavlink_msg_mission_count_encode(&reply, msg->sysid, msg->compid,
+                                         s_rally_count, MAV_MISSION_TYPE_RALLY);
+        send_mavlink_msg(&reply);
+        return;
+    }
     if (mission_type != MAV_MISSION_TYPE_MISSION) return;
 
     s_mission_gcs_sysid = msg->sysid;
@@ -804,6 +995,38 @@ static void handle_mission_count(const mavlink_message_t *msg)
     uint8_t target_system, target_component, mission_type;
     mavlink_msg_mission_count_decode(msg, &count, &target_system, &target_component, &mission_type);
     if (target_system != 0 && target_system != MAV_SYS_ID) return;
+    if (mission_type == MAV_MISSION_TYPE_FENCE) {
+        if (count > FENCE_MAX_ITEMS) {
+            mavlink_message_t ack;
+            mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                           MAV_MISSION_NO_SPACE, MAV_MISSION_TYPE_FENCE);
+            send_mavlink_msg(&ack);
+        } else {
+            s_fence_count = count;
+            ESP_LOGI(TAG, "FENCE_COUNT: %u items", count);
+            mavlink_message_t ack;
+            mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                           MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_FENCE);
+            send_mavlink_msg(&ack);
+        }
+        return;
+    }
+    if (mission_type == MAV_MISSION_TYPE_RALLY) {
+        if (count > RALLY_MAX_ITEMS) {
+            mavlink_message_t ack;
+            mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                           MAV_MISSION_NO_SPACE, MAV_MISSION_TYPE_RALLY);
+            send_mavlink_msg(&ack);
+        } else {
+            s_rally_count = count;
+            ESP_LOGI(TAG, "RALLY_COUNT: %u items", count);
+            mavlink_message_t ack;
+            mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                           MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_RALLY);
+            send_mavlink_msg(&ack);
+        }
+        return;
+    }
     if (mission_type != MAV_MISSION_TYPE_MISSION) return;
 
     s_mission_gcs_sysid = msg->sysid;
@@ -943,6 +1166,22 @@ static void handle_mission_clear_all(const mavlink_message_t *msg)
     mavlink_msg_mission_clear_all_decode(msg, &target_system, &target_component, &mission_type);
     if (target_system != 0 && target_system != MAV_SYS_ID) return;
 
+    if (mission_type == MAV_MISSION_TYPE_FENCE || mission_type == MAV_MISSION_TYPE_ALL) {
+        s_fence_count = 0;
+        ESP_LOGI(TAG, "Fence items cleared");
+    }
+    if (mission_type == MAV_MISSION_TYPE_RALLY || mission_type == MAV_MISSION_TYPE_ALL) {
+        s_rally_count = 0;
+        ESP_LOGI(TAG, "Rally points cleared");
+    }
+    if (mission_type != MAV_MISSION_TYPE_MISSION && mission_type != MAV_MISSION_TYPE_ALL) {
+        mavlink_message_t ack;
+        mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                       MAV_MISSION_ACCEPTED, mission_type);
+        send_mavlink_msg(&ack);
+        return;
+    }
+
     ESP_LOGI(TAG, "MISSION_CLEAR_ALL");
     s_mission_count = 0;
     s_mission_current_seq = 0;
@@ -979,6 +1218,83 @@ static void handle_mission_set_current(const mavlink_message_t *msg)
     rpc_cmd.timestamp_ms = get_time_ms();
     rpc_cmd.data.mission_set_current_cmd.seq = seq;
     rpc_send_command(s_rpc_ctx, &rpc_cmd);
+}
+
+static void handle_file_transfer_protocol(const mavlink_message_t *msg)
+{
+    uint8_t target_network, target_system, target_component;
+    uint8_t payload[251];
+    uint8_t payload_len;
+
+    mavlink_msg_file_transfer_protocol_decode(msg, &target_network,
+        &target_system, &target_component, payload, &payload_len);
+
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+    if (payload_len < 12) return; /* FTP header is 12 bytes minimum */
+
+    /* FTP payload structure:
+     * [0..1] seq_number
+     * [2]    session
+     * [3]    opcode
+     * [4]    size
+     * [5]    req_opcode
+     * [6]    burst_complete
+     * [7]    padding
+     * [8..11] offset (uint32_t LE)
+     * [12..] data
+     */
+    uint16_t seq = payload[0] | ((uint16_t)payload[1] << 8);
+    uint8_t opcode = payload[3];
+
+    /* Build NAK response template */
+    uint8_t resp[251];
+    memset(resp, 0, sizeof(resp));
+    resp[0] = payload[0]; /* seq low */
+    resp[1] = payload[1]; /* seq high */
+    resp[2] = payload[2]; /* session */
+    resp[5] = opcode;     /* req_opcode */
+
+    switch (opcode) {
+    case FTP_OPCODE_TERMINATE:
+    case FTP_OPCODE_RESET:
+        resp[3] = FTP_OPCODE_ACK;
+        resp[4] = 0; /* size = 0 */
+        break;
+
+    case FTP_OPCODE_LIST_DIR:
+        /* Return empty directory listing (no files) */
+        resp[3] = FTP_OPCODE_NAK;
+        resp[4] = 1;
+        resp[12] = FTP_ERR_EOF;
+        break;
+
+    case FTP_OPCODE_OPEN_FILE_RO:
+        /* No files available */
+        resp[3] = FTP_OPCODE_NAK;
+        resp[4] = 1;
+        resp[12] = FTP_ERR_FILENOTFOUND;
+        break;
+
+    case FTP_OPCODE_READ_FILE:
+        resp[3] = FTP_OPCODE_NAK;
+        resp[4] = 1;
+        resp[12] = FTP_ERR_EOF;
+        break;
+
+    default:
+        resp[3] = FTP_OPCODE_NAK;
+        resp[4] = 1;
+        resp[12] = FTP_ERR_FAIL;
+        break;
+    }
+
+    mavlink_message_t reply;
+    mavlink_msg_file_transfer_protocol_encode(&reply, 0, msg->sysid, msg->compid,
+                                               resp, 13);
+    send_mavlink_msg(&reply);
+
+    ESP_LOGD(TAG, "FTP: opcode=%d seq=%u -> resp=%d", opcode, seq, resp[3]);
+    (void)seq; /* suppress unused warning when LOG_LOCAL_LEVEL < DEBUG */
 }
 
 static void process_mavlink_message(const mavlink_message_t *msg)
@@ -1027,6 +1343,9 @@ static void process_mavlink_message(const mavlink_message_t *msg)
         break;
     case MAVLINK_MSG_ID_MISSION_SET_CURRENT:
         handle_mission_set_current(msg);
+        break;
+    case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
+        handle_file_transfer_protocol(msg);
         break;
     default:
         ESP_LOGD(TAG, "Unhandled MAVLink msg ID: %lu from sys=%d comp=%d",
@@ -1084,10 +1403,22 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     s_has_battery = false;
     s_has_status = false;
     s_has_rc = false;
+    s_has_servo = false;
+    s_has_imu_raw = false;
+    s_has_estimator = false;
+    s_has_mag_raw = false;
+    s_has_baro_raw = false;
 
     s_has_home = false;
     s_mission_count = 0;
     s_mission_state = MISSION_STATE_IDLE;
+
+    /* Reset vibration accumulators */
+    s_vib_accel_x_sq = 0.0f;
+    s_vib_accel_y_sq = 0.0f;
+    s_vib_accel_z_sq = 0.0f;
+    s_vib_sample_count = 0;
+    s_vib_clip[0] = s_vib_clip[1] = s_vib_clip[2] = 0;
 
     uint32_t now = get_time_ms();
     s_last_heartbeat_ms  = now;
@@ -1097,6 +1428,9 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     s_last_vfr_hud_ms    = now;
     s_last_ext_state_ms  = now;
     s_last_home_ms       = now;
+    s_last_estimator_ms  = now;
+    s_last_vibration_ms  = now;
+    s_last_highres_ms    = now;
 
     ESP_LOGI(TAG, "PX4-compat MAVLink handler initialized (HB=%dHz ATT=%dHz GPS=%dHz BAT=%dHz)",
              s_config.heartbeat_hz, s_config.attitude_hz,

@@ -288,3 +288,52 @@ void mavlink_msg_mission_set_current_decode(const mavlink_message_t *msg,
 /* ── Mission Current (ID 42) ─────────────────────────────────── */
 
 void mavlink_msg_mission_current_encode(mavlink_message_t *msg, uint16_t seq);
+
+/* ── Vibration (ID 241) ──────────────────────────────────────── */
+
+void mavlink_msg_vibration_encode(mavlink_message_t *msg,
+                                  uint64_t time_usec,
+                                  float vibration_x, float vibration_y, float vibration_z,
+                                  uint32_t clipping_0, uint32_t clipping_1, uint32_t clipping_2);
+
+/* ── Estimator Status (ID 230) ───────────────────────────────── */
+
+void mavlink_msg_estimator_status_encode(mavlink_message_t *msg,
+                                         uint64_t time_usec,
+                                         uint16_t flags,
+                                         float vel_ratio, float pos_horiz_ratio,
+                                         float pos_vert_ratio, float mag_ratio,
+                                         float hagl_ratio, float tas_ratio,
+                                         float pos_horiz_accuracy, float pos_vert_accuracy);
+
+/* ── HIGHRES_IMU (ID 105) ────────────────────────────────────── */
+
+void mavlink_msg_highres_imu_encode(mavlink_message_t *msg,
+                                    uint64_t time_usec,
+                                    float xacc, float yacc, float zacc,
+                                    float xgyro, float ygyro, float zgyro,
+                                    float xmag, float ymag, float zmag,
+                                    float abs_pressure, float diff_pressure,
+                                    float pressure_alt, float temperature,
+                                    uint16_t fields_updated);
+
+/* ── Local Position NED (ID 32) ──────────────────────────────── */
+
+void mavlink_msg_local_position_ned_encode(mavlink_message_t *msg,
+                                           uint32_t time_boot_ms,
+                                           float x, float y, float z,
+                                           float vx, float vy, float vz);
+
+/* ── File Transfer Protocol (ID 110) ─────────────────────────── */
+
+void mavlink_msg_file_transfer_protocol_encode(mavlink_message_t *msg,
+                                               uint8_t target_network,
+                                               uint8_t target_system,
+                                               uint8_t target_component,
+                                               const uint8_t *payload, uint8_t payload_len);
+
+void mavlink_msg_file_transfer_protocol_decode(const mavlink_message_t *msg,
+                                               uint8_t *target_network,
+                                               uint8_t *target_system,
+                                               uint8_t *target_component,
+                                               uint8_t *payload, uint8_t *payload_len);
