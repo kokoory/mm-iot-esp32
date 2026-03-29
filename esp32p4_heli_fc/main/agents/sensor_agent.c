@@ -157,6 +157,20 @@ static void sensor_task(void *param)
     i2c_sync_sensors_done();
 
     /* GPS init (starts its own internal UART parser task) */
+    bool gps_ok = (gps_init(&s_gps, GPS_UART_NUM, PIN_GPS_TX, PIN_GPS_RX, GPS_BAUD_RATE) == 0);
+    if (gps_ok) {
+        ESP_LOGI(TAG, "GPS (NMEA UART%d) initialized", GPS_UART_NUM);
+    } else {
+        ESP_LOGW(TAG, "GPS init FAILED (position unavailable)");
+    }
+
+    /* SBUS RC receiver init */
+    bool sbus_ok = (sbus_init() == 0);
+    if (sbus_ok) {
+        ESP_LOGI(TAG, "SBUS RC receiver initialized");
+    } else {
+        ESP_LOGW(TAG, "SBUS init FAILED (RC unavailable)");
+    }
 
     /* ---- Initialize estimators ---- */
     ahrs_init(&s_ahrs, param_get(PARAM_AHRS_BETA));
