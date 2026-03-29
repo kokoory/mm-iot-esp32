@@ -19,6 +19,11 @@ enum {
     RPC_MSG_PARAM_VALUE   = 0x08,
     RPC_MSG_SERVO_OUTPUT  = 0x09,
     RPC_MSG_STATUSTEXT    = 0x0A,
+    RPC_MSG_HOME_POSITION = 0x0B,
+    RPC_MSG_MISSION_COUNT = 0x0C,
+    RPC_MSG_MISSION_ITEM  = 0x0D,
+    RPC_MSG_MISSION_ACK   = 0x0E,
+    RPC_MSG_MISSION_CURRENT = 0x0F,
 };
 
 /* Message types: Core 1 -> Core 0 (commands) */
@@ -32,6 +37,12 @@ enum {
     RPC_CMD_PARAM_REQUEST_READ = 0x86,
     RPC_CMD_PARAM_REQUEST_LIST = 0x87,
     RPC_CMD_PARAM_SAVE        = 0x88,
+    RPC_CMD_MISSION_COUNT     = 0x89,
+    RPC_CMD_MISSION_ITEM      = 0x8A,
+    RPC_CMD_MISSION_REQUEST_LIST = 0x8B,
+    RPC_CMD_MISSION_CLEAR_ALL = 0x8C,
+    RPC_CMD_MISSION_SET_CURRENT = 0x8D,
+    RPC_CMD_REQUEST_HOME_POSITION = 0x8E,
 };
 
 /* Telemetry message (Core 0 -> Core 1) */
@@ -89,6 +100,36 @@ typedef struct {
         } servo_output;
 
         struct {
+            int32_t lat;            /* degE7 */
+            int32_t lon;            /* degE7 */
+            int32_t alt;            /* mm MSL */
+        } home_position;
+
+        struct {
+            uint16_t count;         /* total mission items */
+        } mission_count;
+
+        struct {
+            uint16_t seq;
+            uint8_t  frame;
+            uint16_t command;
+            uint8_t  current;
+            uint8_t  autocontinue;
+            float    param1, param2, param3, param4;
+            int32_t  x;            /* lat*1e7 */
+            int32_t  y;            /* lon*1e7 */
+            float    z;            /* alt */
+        } mission_item;
+
+        struct {
+            uint8_t result;         /* MAV_MISSION_RESULT */
+        } mission_ack;
+
+        struct {
+            uint16_t seq;           /* current mission sequence number */
+        } mission_current;
+
+        struct {
             uint8_t severity;       /* MAV_SEVERITY */
             char    text[50];
         } statustext;
@@ -105,5 +146,22 @@ typedef struct {
         struct { int16_t channels[8]; } rc_override;
         struct { char name[17]; float value; } param_set;
         struct { char name[17]; int16_t index; } param_request;
+        struct {
+            uint16_t count;
+        } mission_count_cmd;
+        struct {
+            uint16_t seq;
+            uint8_t  frame;
+            uint16_t command;
+            uint8_t  current;
+            uint8_t  autocontinue;
+            float    param1, param2, param3, param4;
+            int32_t  x;
+            int32_t  y;
+            float    z;
+        } mission_item_cmd;
+        struct {
+            uint16_t seq;
+        } mission_set_current_cmd;
     } data;
 } rpc_command_msg_t;

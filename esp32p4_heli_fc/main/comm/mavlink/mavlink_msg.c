@@ -36,6 +36,17 @@ uint8_t mavlink_get_crc_extra(uint32_t msgid)
     case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:  return 159;
     case MAVLINK_MSG_ID_PARAM_VALUE:         return 220;
     case MAVLINK_MSG_ID_PARAM_SET:           return 168;
+    case MAVLINK_MSG_ID_MISSION_REQUEST_LIST: return 132;
+    case MAVLINK_MSG_ID_MISSION_COUNT:       return 221;
+    case MAVLINK_MSG_ID_MISSION_ITEM_INT:    return 38;
+    case MAVLINK_MSG_ID_MISSION_REQUEST_INT: return 196;
+    case MAVLINK_MSG_ID_MISSION_ACK:         return 153;
+    case MAVLINK_MSG_ID_MISSION_CLEAR_ALL:   return 232;
+    case MAVLINK_MSG_ID_MISSION_SET_CURRENT: return 28;
+    case MAVLINK_MSG_ID_MISSION_CURRENT:     return 28;
+    case MAVLINK_MSG_ID_AUTOPILOT_VERSION:   return 178;
+    case MAVLINK_MSG_ID_HOME_POSITION:       return 104;
+    case MAVLINK_MSG_ID_EXTENDED_SYS_STATE:  return 130;
     default:                                 return 0;
     }
 }
@@ -820,4 +831,309 @@ void mavlink_msg_param_request_read_decode(const mavlink_message_t *msg,
         memcpy(param_id, &msg->payload[4], 16);
         param_id[16] = '\0';
     }
+}
+
+/* ── Home Position (ID 242) ──────────────────────────────────── *
+ * Payload layout (60 bytes):
+ *   0-3:   lat (int32, degE7)
+ *   4-7:   lon (int32, degE7)
+ *   8-11:  alt (int32, mm MSL)
+ *   12-15: x (float, local X)
+ *   16-19: y (float, local Y)
+ *   20-23: z (float, local Z)
+ *   24-39: q[4] (float[4], quaternion)
+ *   40-43: approach_x (float)
+ *   44-47: approach_y (float)
+ *   48-51: approach_z (float)
+ *   52-59: time_usec (uint64)
+ */
+void mavlink_msg_home_position_encode(mavlink_message_t *msg,
+                                      int32_t lat, int32_t lon, int32_t alt,
+                                      float x, float y, float z,
+                                      const float q[4],
+                                      float approach_x, float approach_y, float approach_z,
+                                      uint64_t time_usec)
+{
+    msg_init(msg, MAVLINK_MSG_ID_HOME_POSITION);
+    msg->len = 60;
+    memset(msg->payload, 0, 60);
+    put_i32(msg->payload, 0, lat);
+    put_i32(msg->payload, 4, lon);
+    put_i32(msg->payload, 8, alt);
+    put_float(msg->payload, 12, x);
+    put_float(msg->payload, 16, y);
+    put_float(msg->payload, 20, z);
+    for (int i = 0; i < 4; i++) {
+        put_float(msg->payload, 24 + i * 4, q ? q[i] : (i == 0 ? 1.0f : 0.0f));
+    }
+    put_float(msg->payload, 40, approach_x);
+    put_float(msg->payload, 44, approach_y);
+    put_float(msg->payload, 48, approach_z);
+    put_u64(msg->payload, 52, time_usec);
+    mavlink_finalize(msg);
+}
+
+/* ── Extended Sys State (ID 245) ─────────────────────────────── *
+ * Payload layout (2 bytes):
+ *   0: vtol_state (uint8)
+ *   1: landed_state (uint8)
+ */
+void mavlink_msg_extended_sys_state_encode(mavlink_message_t *msg,
+                                           uint8_t vtol_state,
+                                           uint8_t landed_state)
+{
+    msg_init(msg, MAVLINK_MSG_ID_EXTENDED_SYS_STATE);
+    msg->len = 2;
+    put_u8(msg->payload, 0, vtol_state);
+    put_u8(msg->payload, 1, landed_state);
+    mavlink_finalize(msg);
+}
+
+/* ── Autopilot Version (ID 148) ──────────────────────────────── *
+ * Payload layout (78 bytes):
+ *   0-7:   capabilities (uint64)
+ *   8-11:  flight_sw_version (uint32)
+ *   12-15: middleware_sw_version (uint32)
+ *   16-19: os_sw_version (uint32)
+ *   20-23: board_version (uint32)
+ *   24-31: flight_custom_version (uint8[8])
+ *   32-39: middleware_custom_version (uint8[8])
+ *   40-47: os_custom_version (uint8[8])
+ *   48-49: vendor_id (uint16)
+ *   50-51: product_id (uint16)
+ *   52-59: uid (uint64)
+ *   60-77: uid2 (uint8[18]) - optional extension
+ */
+void mavlink_msg_autopilot_version_encode(mavlink_message_t *msg,
+                                          uint64_t capabilities,
+                                          uint32_t flight_sw_version,
+                                          uint32_t middleware_sw_version,
+                                          uint32_t os_sw_version,
+                                          uint32_t board_version,
+                                          const uint8_t flight_custom_version[8],
+                                          uint64_t uid)
+{
+    msg_init(msg, MAVLINK_MSG_ID_AUTOPILOT_VERSION);
+    msg->len = 60;
+    memset(msg->payload, 0, 60);
+    put_u64(msg->payload, 0, capabilities);
+    put_u32(msg->payload, 8, flight_sw_version);
+    put_u32(msg->payload, 12, middleware_sw_version);
+    put_u32(msg->payload, 16, os_sw_version);
+    put_u32(msg->payload, 20, board_version);
+    if (flight_custom_version) {
+        memcpy(&msg->payload[24], flight_custom_version, 8);
+    }
+    /* middleware_custom_version at 32, os_custom_version at 40: leave as 0 */
+    put_u16(msg->payload, 48, 0); /* vendor_id */
+    put_u16(msg->payload, 50, 0); /* product_id */
+    put_u64(msg->payload, 52, uid);
+    mavlink_finalize(msg);
+}
+
+/* ── Mission Count (ID 44) ───────────────────────────────────── *
+ * Payload layout (5 bytes):
+ *   0-1: count (uint16)
+ *   2:   target_system (uint8)
+ *   3:   target_component (uint8)
+ *   4:   mission_type (uint8) - extension
+ */
+void mavlink_msg_mission_count_encode(mavlink_message_t *msg,
+                                      uint8_t target_system, uint8_t target_component,
+                                      uint16_t count, uint8_t mission_type)
+{
+    msg_init(msg, MAVLINK_MSG_ID_MISSION_COUNT);
+    msg->len = 5;
+    put_u16(msg->payload, 0, count);
+    put_u8(msg->payload, 2, target_system);
+    put_u8(msg->payload, 3, target_component);
+    put_u8(msg->payload, 4, mission_type);
+    mavlink_finalize(msg);
+}
+
+void mavlink_msg_mission_count_decode(const mavlink_message_t *msg,
+                                      uint16_t *count,
+                                      uint8_t *target_system, uint8_t *target_component,
+                                      uint8_t *mission_type)
+{
+    if (count) *count = get_u16(msg->payload, 0);
+    if (target_system) *target_system = get_u8(msg->payload, 2);
+    if (target_component) *target_component = get_u8(msg->payload, 3);
+    if (mission_type) *mission_type = (msg->len > 4) ? get_u8(msg->payload, 4) : 0;
+}
+
+/* ── Mission Request Int (ID 51) ─────────────────────────────── *
+ * Payload layout (5 bytes):
+ *   0-1: seq (uint16)
+ *   2:   target_system (uint8)
+ *   3:   target_component (uint8)
+ *   4:   mission_type (uint8) - extension
+ */
+void mavlink_msg_mission_request_int_encode(mavlink_message_t *msg,
+                                            uint8_t target_system, uint8_t target_component,
+                                            uint16_t seq, uint8_t mission_type)
+{
+    msg_init(msg, MAVLINK_MSG_ID_MISSION_REQUEST_INT);
+    msg->len = 5;
+    put_u16(msg->payload, 0, seq);
+    put_u8(msg->payload, 2, target_system);
+    put_u8(msg->payload, 3, target_component);
+    put_u8(msg->payload, 4, mission_type);
+    mavlink_finalize(msg);
+}
+
+void mavlink_msg_mission_request_int_decode(const mavlink_message_t *msg,
+                                            uint16_t *seq,
+                                            uint8_t *target_system, uint8_t *target_component,
+                                            uint8_t *mission_type)
+{
+    if (seq) *seq = get_u16(msg->payload, 0);
+    if (target_system) *target_system = get_u8(msg->payload, 2);
+    if (target_component) *target_component = get_u8(msg->payload, 3);
+    if (mission_type) *mission_type = (msg->len > 4) ? get_u8(msg->payload, 4) : 0;
+}
+
+/* ── Mission Item Int (ID 73) ────────────────────────────────── *
+ * Payload layout (38 bytes):
+ *   0-3:   param1 (float)
+ *   4-7:   param2 (float)
+ *   8-11:  param3 (float)
+ *   12-15: param4 (float)
+ *   16-19: x (int32, lat*1e7)
+ *   20-23: y (int32, lon*1e7)
+ *   24-27: z (float, alt)
+ *   28-29: seq (uint16)
+ *   30-31: command (uint16)
+ *   32:    target_system (uint8)
+ *   33:    target_component (uint8)
+ *   34:    frame (uint8)
+ *   35:    current (uint8)
+ *   36:    autocontinue (uint8)
+ *   37:    mission_type (uint8) - extension
+ */
+void mavlink_msg_mission_item_int_encode(mavlink_message_t *msg,
+                                         uint8_t target_system, uint8_t target_component,
+                                         const mavlink_mission_item_int_t *item)
+{
+    msg_init(msg, MAVLINK_MSG_ID_MISSION_ITEM_INT);
+    msg->len = 38;
+    memset(msg->payload, 0, 38);
+    put_float(msg->payload, 0, item->param1);
+    put_float(msg->payload, 4, item->param2);
+    put_float(msg->payload, 8, item->param3);
+    put_float(msg->payload, 12, item->param4);
+    put_i32(msg->payload, 16, item->x);
+    put_i32(msg->payload, 20, item->y);
+    put_float(msg->payload, 24, item->z);
+    put_u16(msg->payload, 28, item->seq);
+    put_u16(msg->payload, 30, item->command);
+    put_u8(msg->payload, 32, target_system);
+    put_u8(msg->payload, 33, target_component);
+    put_u8(msg->payload, 34, item->frame);
+    put_u8(msg->payload, 35, item->current);
+    put_u8(msg->payload, 36, item->autocontinue);
+    put_u8(msg->payload, 37, item->mission_type);
+    mavlink_finalize(msg);
+}
+
+void mavlink_msg_mission_item_int_decode(const mavlink_message_t *msg,
+                                         mavlink_mission_item_int_t *item,
+                                         uint8_t *target_system, uint8_t *target_component)
+{
+    if (item) {
+        item->param1 = get_float(msg->payload, 0);
+        item->param2 = get_float(msg->payload, 4);
+        item->param3 = get_float(msg->payload, 8);
+        item->param4 = get_float(msg->payload, 12);
+        item->x = (int32_t)((uint32_t)msg->payload[16] | ((uint32_t)msg->payload[17] << 8)
+                   | ((uint32_t)msg->payload[18] << 16) | ((uint32_t)msg->payload[19] << 24));
+        item->y = (int32_t)((uint32_t)msg->payload[20] | ((uint32_t)msg->payload[21] << 8)
+                   | ((uint32_t)msg->payload[22] << 16) | ((uint32_t)msg->payload[23] << 24));
+        item->z = get_float(msg->payload, 24);
+        item->seq = get_u16(msg->payload, 28);
+        item->command = get_u16(msg->payload, 30);
+        item->frame = get_u8(msg->payload, 34);
+        item->current = get_u8(msg->payload, 35);
+        item->autocontinue = get_u8(msg->payload, 36);
+        item->mission_type = (msg->len > 37) ? get_u8(msg->payload, 37) : 0;
+    }
+    if (target_system) *target_system = get_u8(msg->payload, 32);
+    if (target_component) *target_component = get_u8(msg->payload, 33);
+}
+
+/* ── Mission Ack (ID 47) ─────────────────────────────────────── *
+ * Payload layout (4 bytes):
+ *   0:   target_system (uint8)
+ *   1:   target_component (uint8)
+ *   2:   type (uint8, MAV_MISSION_RESULT)
+ *   3:   mission_type (uint8) - extension
+ */
+void mavlink_msg_mission_ack_encode(mavlink_message_t *msg,
+                                    uint8_t target_system, uint8_t target_component,
+                                    uint8_t type, uint8_t mission_type)
+{
+    msg_init(msg, MAVLINK_MSG_ID_MISSION_ACK);
+    msg->len = 4;
+    put_u8(msg->payload, 0, target_system);
+    put_u8(msg->payload, 1, target_component);
+    put_u8(msg->payload, 2, type);
+    put_u8(msg->payload, 3, mission_type);
+    mavlink_finalize(msg);
+}
+
+/* ── Mission Request List (ID 43) - decode ───────────────────── *
+ * Payload layout (3 bytes):
+ *   0: target_system (uint8)
+ *   1: target_component (uint8)
+ *   2: mission_type (uint8) - extension
+ */
+void mavlink_msg_mission_request_list_decode(const mavlink_message_t *msg,
+                                             uint8_t *target_system, uint8_t *target_component,
+                                             uint8_t *mission_type)
+{
+    if (target_system) *target_system = get_u8(msg->payload, 0);
+    if (target_component) *target_component = get_u8(msg->payload, 1);
+    if (mission_type) *mission_type = (msg->len > 2) ? get_u8(msg->payload, 2) : 0;
+}
+
+/* ── Mission Clear All (ID 45) - decode ──────────────────────── *
+ * Payload layout (3 bytes):
+ *   0: target_system (uint8)
+ *   1: target_component (uint8)
+ *   2: mission_type (uint8)
+ */
+void mavlink_msg_mission_clear_all_decode(const mavlink_message_t *msg,
+                                          uint8_t *target_system, uint8_t *target_component,
+                                          uint8_t *mission_type)
+{
+    if (target_system) *target_system = get_u8(msg->payload, 0);
+    if (target_component) *target_component = get_u8(msg->payload, 1);
+    if (mission_type) *mission_type = (msg->len > 2) ? get_u8(msg->payload, 2) : 0;
+}
+
+/* ── Mission Set Current (ID 41) - decode ────────────────────── *
+ * Payload layout (4 bytes):
+ *   0-1: seq (uint16)
+ *   2:   target_system (uint8)
+ *   3:   target_component (uint8)
+ */
+void mavlink_msg_mission_set_current_decode(const mavlink_message_t *msg,
+                                            uint16_t *seq,
+                                            uint8_t *target_system, uint8_t *target_component)
+{
+    if (seq) *seq = get_u16(msg->payload, 0);
+    if (target_system) *target_system = get_u8(msg->payload, 2);
+    if (target_component) *target_component = get_u8(msg->payload, 3);
+}
+
+/* ── Mission Current (ID 42) ─────────────────────────────────── *
+ * Payload layout (2 bytes):
+ *   0-1: seq (uint16)
+ */
+void mavlink_msg_mission_current_encode(mavlink_message_t *msg, uint16_t seq)
+{
+    msg_init(msg, MAVLINK_MSG_ID_MISSION_CURRENT);
+    msg->len = 2;
+    put_u16(msg->payload, 0, seq);
+    mavlink_finalize(msg);
 }

@@ -8,6 +8,7 @@ typedef enum {
     FLIGHT_MODE_RTH,         /* Return to home */
     FLIGHT_MODE_LAND,        /* Automated landing */
     FLIGHT_MODE_ACRO,        /* Rate-only (no attitude stabilization) */
+    FLIGHT_MODE_MISSION,     /* Autonomous waypoint mission */
     FLIGHT_MODE_COUNT
 } flight_mode_t;
 

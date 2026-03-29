@@ -189,3 +189,102 @@ void mavlink_msg_command_long_decode(const mavlink_message_t *msg,
 
 void mavlink_msg_command_ack_encode(mavlink_message_t *msg,
                                     uint16_t command, uint8_t result);
+
+/* ── Home Position (ID 242) ──────────────────────────────────── */
+
+void mavlink_msg_home_position_encode(mavlink_message_t *msg,
+                                      int32_t lat, int32_t lon, int32_t alt,
+                                      float x, float y, float z,
+                                      const float q[4],
+                                      float approach_x, float approach_y, float approach_z,
+                                      uint64_t time_usec);
+
+/* ── Extended Sys State (ID 245) ─────────────────────────────── */
+
+void mavlink_msg_extended_sys_state_encode(mavlink_message_t *msg,
+                                           uint8_t vtol_state,
+                                           uint8_t landed_state);
+
+/* ── Autopilot Version (ID 148) ──────────────────────────────── */
+
+void mavlink_msg_autopilot_version_encode(mavlink_message_t *msg,
+                                          uint64_t capabilities,
+                                          uint32_t flight_sw_version,
+                                          uint32_t middleware_sw_version,
+                                          uint32_t os_sw_version,
+                                          uint32_t board_version,
+                                          const uint8_t flight_custom_version[8],
+                                          uint64_t uid);
+
+/* ── Mission Count (ID 44) ───────────────────────────────────── */
+
+void mavlink_msg_mission_count_encode(mavlink_message_t *msg,
+                                      uint8_t target_system, uint8_t target_component,
+                                      uint16_t count, uint8_t mission_type);
+
+void mavlink_msg_mission_count_decode(const mavlink_message_t *msg,
+                                      uint16_t *count,
+                                      uint8_t *target_system, uint8_t *target_component,
+                                      uint8_t *mission_type);
+
+/* ── Mission Request Int (ID 51) ─────────────────────────────── */
+
+void mavlink_msg_mission_request_int_encode(mavlink_message_t *msg,
+                                            uint8_t target_system, uint8_t target_component,
+                                            uint16_t seq, uint8_t mission_type);
+
+void mavlink_msg_mission_request_int_decode(const mavlink_message_t *msg,
+                                            uint16_t *seq,
+                                            uint8_t *target_system, uint8_t *target_component,
+                                            uint8_t *mission_type);
+
+/* ── Mission Item Int (ID 73) ────────────────────────────────── */
+
+typedef struct {
+    uint16_t seq;
+    uint8_t  frame;
+    uint16_t command;
+    uint8_t  current;
+    uint8_t  autocontinue;
+    float    param1, param2, param3, param4;
+    int32_t  x;  /* lat * 1e7 */
+    int32_t  y;  /* lon * 1e7 */
+    float    z;  /* alt */
+    uint8_t  mission_type;
+} mavlink_mission_item_int_t;
+
+void mavlink_msg_mission_item_int_encode(mavlink_message_t *msg,
+                                         uint8_t target_system, uint8_t target_component,
+                                         const mavlink_mission_item_int_t *item);
+
+void mavlink_msg_mission_item_int_decode(const mavlink_message_t *msg,
+                                         mavlink_mission_item_int_t *item,
+                                         uint8_t *target_system, uint8_t *target_component);
+
+/* ── Mission Ack (ID 47) ─────────────────────────────────────── */
+
+void mavlink_msg_mission_ack_encode(mavlink_message_t *msg,
+                                    uint8_t target_system, uint8_t target_component,
+                                    uint8_t type, uint8_t mission_type);
+
+/* ── Mission Request List (ID 43) - decode ───────────────────── */
+
+void mavlink_msg_mission_request_list_decode(const mavlink_message_t *msg,
+                                             uint8_t *target_system, uint8_t *target_component,
+                                             uint8_t *mission_type);
+
+/* ── Mission Clear All (ID 45) - decode ──────────────────────── */
+
+void mavlink_msg_mission_clear_all_decode(const mavlink_message_t *msg,
+                                          uint8_t *target_system, uint8_t *target_component,
+                                          uint8_t *mission_type);
+
+/* ── Mission Set Current (ID 41) - decode ────────────────────── */
+
+void mavlink_msg_mission_set_current_decode(const mavlink_message_t *msg,
+                                            uint16_t *seq,
+                                            uint8_t *target_system, uint8_t *target_component);
+
+/* ── Mission Current (ID 42) ─────────────────────────────────── */
+
+void mavlink_msg_mission_current_encode(mavlink_message_t *msg, uint16_t seq);

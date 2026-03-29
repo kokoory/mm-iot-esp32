@@ -42,6 +42,7 @@
 #include "../common/param.h"
 #include "../uorb/topics/vehicle_attitude.h"
 #include "../uorb/topics/vehicle_local_position.h"
+#include "mission_mgr.h"
 
 static const char *TAG = "sysmon_agent";
 
@@ -180,6 +181,9 @@ static void sysmon_task(void *param)
     /* Wait for topics to be advertised by other agents */
     vTaskDelay(pdMS_TO_TICKS(1000));
 
+    /* Initialize mission manager */
+    mission_mgr_init();
+
     /* Initialize hardware */
     init_adc();
     init_led();
@@ -221,6 +225,16 @@ static void sysmon_task(void *param)
     /* Previous sensor health for transition detection */
     bool prev_baro_ok = false;
     bool prev_mag_ok  = false;
+
+    /* Home position (captured on first arm with GPS 3D fix) */
+    double home_lat = 0.0, home_lon = 0.0;
+    float home_alt_msl = 0.0f;
+    bool home_set = false;
+    bool home_sent = false; /* true once RPC_MSG_HOME_POSITION sent */
+
+    /* Mission current periodic send timer */
+    uint32_t last_mission_current_ms = 0;
+    #define MISSION_CURRENT_INTERVAL_MS 1000 /* send every 1 s in mission mode */
 
     /* LED state */
     uint32_t led_counter = 0;
@@ -293,6 +307,36 @@ static void sysmon_task(void *param)
                 last_rc_ts = rc.timestamp_us;
                 last_rc = rc;
             }
+        }
+
+        /* ---- Capture home position on first arm with GPS 3D fix ---- */
+        if (arm_state == ARM_STATE_ARMED && !home_set &&
+            gps_updated && gps_data.fix_type >= 3 && gps_data.satellites >= 6) {
+            home_lat = gps_data.latitude;
+            home_lon = gps_data.longitude;
+            home_alt_msl = gps_data.altitude_msl;
+            home_set = true;
+            home_sent = false;
+            ESP_LOGI(TAG, "HOME set: lat=%.7f lon=%.7f alt_msl=%.1f",
+                     home_lat, home_lon, home_alt_msl);
+
+            /* Send home position to GCS via RPC */
+            if (rpc != NULL) {
+                rpc_telemetry_msg_t hmsg;
+                memset(&hmsg, 0, sizeof(hmsg));
+                hmsg.msg_type = RPC_MSG_HOME_POSITION;
+                hmsg.timestamp_ms = now_ms;
+                hmsg.data.home_position.lat = (int32_t)(home_lat * 1e7);
+                hmsg.data.home_position.lon = (int32_t)(home_lon * 1e7);
+                hmsg.data.home_position.alt = (int32_t)(home_alt_msl * 1000.0f); /* mm MSL */
+                rpc_send_telemetry(rpc, &hmsg);
+                home_sent = true;
+            }
+        }
+        /* Clear home on disarm so it re-captures on next arm */
+        if (arm_state == ARM_STATE_DISARMED && home_set) {
+            home_set = false;
+            home_sent = false;
         }
 
         bool imu_ok  = (last_imu_ts > 0)  && ((now_us - last_imu_ts) < (uint64_t)(param_get(PARAM_SENSOR_TIMEOUT_MS) * 1000.0f));
