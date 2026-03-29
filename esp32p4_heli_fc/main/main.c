@@ -105,11 +105,11 @@ void app_main(void)
 
     /* Step 5: Start FC agents on Core 0 */
     sensor_agent_start();     /* IMU, baro, GPS, airspeed */
-#if 0  /* Re-enable once sensors are verified */
     vTaskDelay(pdMS_TO_TICKS(100));
+    sysmon_agent_start(&g_rpc_ctx);  /* System monitor + RPC telemetry forwarding */
+#if 0  /* Re-enable once flight control is needed */
     flight_ctrl_agent_start();
     actuator_agent_start();
-    sysmon_agent_start(&g_rpc_ctx);
 #endif
 
     ESP_LOGI(TAG, "Init complete. Free heap: %lu bytes",
