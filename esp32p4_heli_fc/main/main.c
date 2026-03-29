@@ -113,10 +113,8 @@ void app_main(void)
     sensor_agent_start();     /* IMU, baro, GPS, airspeed */
     vTaskDelay(pdMS_TO_TICKS(100));
     sysmon_agent_start(&g_rpc_ctx);  /* System monitor + RPC telemetry forwarding */
-#if 0  /* Re-enable once flight control is needed */
     flight_ctrl_agent_start();
     actuator_agent_start();
-#endif
 
     ESP_LOGI(TAG, "Init complete. Free heap: %lu bytes",
              (unsigned long)esp_get_free_heap_size());

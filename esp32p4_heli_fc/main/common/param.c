@@ -17,16 +17,20 @@ static const char *TAG = "param";
 
 /* Parameter table - order must match param_id_t enum */
 static const param_meta_t s_param_table[PARAM_COUNT] = {
-    /* Rate controller PID */
-    [PARAM_ROLL_RATE_KP]     = { "MC_ROLLRATE_P",   0.15f,  0.0f,  2.0f },
-    [PARAM_ROLL_RATE_KI]     = { "MC_ROLLRATE_I",   0.05f,  0.0f,  1.0f },
-    [PARAM_ROLL_RATE_KD]     = { "MC_ROLLRATE_D",   0.003f, 0.0f,  0.1f },
-    [PARAM_PITCH_RATE_KP]    = { "MC_PITCHRATE_P",  0.15f,  0.0f,  2.0f },
-    [PARAM_PITCH_RATE_KI]    = { "MC_PITCHRATE_I",  0.05f,  0.0f,  1.0f },
-    [PARAM_PITCH_RATE_KD]    = { "MC_PITCHRATE_D",  0.003f, 0.0f,  0.1f },
+    /* Rate controller PID + Feed-Forward (PX4 heli: FF-dominant, PID starts at 0) */
+    [PARAM_ROLL_RATE_KP]     = { "MC_ROLLRATE_P",   0.0f,   0.0f,  2.0f },
+    [PARAM_ROLL_RATE_KI]     = { "MC_ROLLRATE_I",   0.0f,   0.0f,  1.0f },
+    [PARAM_ROLL_RATE_KD]     = { "MC_ROLLRATE_D",   0.0f,   0.0f,  0.1f },
+    [PARAM_ROLL_RATE_FF]     = { "MC_ROLLRATE_FF",  0.1f,   0.0f,  2.0f },
+    [PARAM_PITCH_RATE_KP]    = { "MC_PITCHRATE_P",  0.0f,   0.0f,  2.0f },
+    [PARAM_PITCH_RATE_KI]    = { "MC_PITCHRATE_I",  0.0f,   0.0f,  1.0f },
+    [PARAM_PITCH_RATE_KD]    = { "MC_PITCHRATE_D",  0.0f,   0.0f,  0.1f },
+    [PARAM_PITCH_RATE_FF]    = { "MC_PITCHRATE_FF", 0.1f,   0.0f,  2.0f },
     [PARAM_YAW_RATE_KP]      = { "MC_YAWRATE_P",    0.3f,   0.0f,  2.0f },
     [PARAM_YAW_RATE_KI]      = { "MC_YAWRATE_I",    0.1f,   0.0f,  1.0f },
     [PARAM_YAW_RATE_KD]      = { "MC_YAWRATE_D",    0.0f,   0.0f,  0.1f },
+    [PARAM_YAW_RATE_FF]      = { "MC_YAWRATE_FF",   0.0f,   0.0f,  2.0f },
+    [PARAM_RATE_K]            = { "MC_RATE_K",       1.0f,   0.1f,  5.0f },
 
     /* Attitude controller */
     [PARAM_ATT_ROLL_KP]      = { "MC_ROLL_P",       4.5f,   0.5f,  12.0f },
@@ -59,7 +63,12 @@ static const param_meta_t s_param_table[PARAM_COUNT] = {
     [PARAM_SERVO_RANGE_US]    = { "H_SERVO_RNG",     500.0f, 100.0f, 600.0f },
     [PARAM_ESC_MIN_US]        = { "H_ESC_MIN",       1000.0f, 800.0f, 1200.0f },
     [PARAM_ESC_MAX_US]        = { "H_ESC_MAX",       2000.0f, 1800.0f, 2200.0f },
-    [PARAM_TAIL_COLL_FF]      = { "H_TAIL_FF",       0.3f,   0.0f,  1.0f },
+    [PARAM_TAIL_COLL_FF]      = { "H_TAIL_FF",       0.3f,   0.0f,  2.0f },
+    [PARAM_TAIL_COLL_FF_OFS]  = { "H_TAIL_FF_OFS",  0.0f,  -1.0f,  1.0f },
+    [PARAM_TAIL_THR_FF]       = { "H_TAIL_THR_FF",  0.0f,   0.0f,  2.0f },
+    [PARAM_YAW_CCW]           = { "H_YAW_CCW",      0.0f,   0.0f,  1.0f },
+    [PARAM_SERVO_LINEARIZE]   = { "H_SVO_THROW",    0.0f,   0.0f,  75.0f },
+    [PARAM_SPOOLUP_TIME]      = { "COM_SPOOLUP_T",  10.0f,  0.0f,  30.0f },
 
     /* Battery thresholds */
     [PARAM_BATT_LOW_V]        = { "BAT_V_LOW",       10.5f,  6.0f,  50.0f },

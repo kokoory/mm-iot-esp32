@@ -199,6 +199,8 @@ static void actuator_task(void *param)
     /* Local state */
     actuator_controls_t act = {0};
     vehicle_status_t    status = {0};
+    bool prev_armed = false;
+    uint64_t arm_start_us = 0;
 
     rpc_context_t *rpc_ctx = main_get_rpc_context();
     TickType_t last_wake = xTaskGetTickCount();
@@ -211,14 +213,31 @@ static void actuator_task(void *param)
         orb_copy(act_sub, &act);
         orb_copy(stat_sub, &status);
 
+        bool armed = (status.arm_state == ARM_STATE_ARMED);
+
+        /* Detect arm transition for spoolup timer */
+        if (armed && !prev_armed) {
+            arm_start_us = now_us;
+            ESP_LOGI(TAG, "Armed: starting %.0fs spoolup ramp",
+                     mixer_config.spoolup_time_s);
+        }
+        prev_armed = armed;
+
+        /* Compute spoolup progress (0..1) */
+        float spoolup = 1.0f;
+        if (armed && mixer_config.spoolup_time_s > 0.0f) {
+            float elapsed_s = (float)(now_us - arm_start_us) * 1.0e-6f;
+            spoolup = constrain_f(elapsed_s / mixer_config.spoolup_time_s, 0.0f, 1.0f);
+        }
+
         /* Watchdog: check actuator_controls freshness */
         bool act_timeout = (act.timestamp_us > 0) &&
                            ((now_us - act.timestamp_us) > ACTUATOR_TIMEOUT_US);
 
-        if (status.arm_state == ARM_STATE_ARMED && !act_timeout) {
+        if (armed && !act_timeout) {
             /* Armed: run mixer and output */
             heli_mixer_output_t mix_out;
-            heli_mixer_update(&mixer_config, &act, &mix_out);
+            heli_mixer_update(&mixer_config, &act, spoolup, &mix_out);
 
             set_pwm_us(0, mix_out.servo1_us);
             set_pwm_us(1, mix_out.servo2_us);

@@ -28,12 +28,16 @@ typedef enum {
     PARAM_ROLL_RATE_KP = 0,
     PARAM_ROLL_RATE_KI,
     PARAM_ROLL_RATE_KD,
+    PARAM_ROLL_RATE_FF,
     PARAM_PITCH_RATE_KP,
     PARAM_PITCH_RATE_KI,
     PARAM_PITCH_RATE_KD,
+    PARAM_PITCH_RATE_FF,
     PARAM_YAW_RATE_KP,
     PARAM_YAW_RATE_KI,
     PARAM_YAW_RATE_KD,
+    PARAM_YAW_RATE_FF,
+    PARAM_RATE_K,               /* Overall rate gain scale factor */
 
     /* Attitude controller gains */
     PARAM_ATT_ROLL_KP,
@@ -67,6 +71,11 @@ typedef enum {
     PARAM_ESC_MIN_US,
     PARAM_ESC_MAX_US,
     PARAM_TAIL_COLL_FF,
+    PARAM_TAIL_COLL_FF_OFS,     /* Collective offset for min torque (yaw compensation) */
+    PARAM_TAIL_THR_FF,          /* Throttle -> tail feedforward */
+    PARAM_YAW_CCW,              /* Main rotor CCW (1) or CW (0) */
+    PARAM_SERVO_LINEARIZE,      /* Servo throw angle (deg) for inverse-sine linearization, 0=off */
+    PARAM_SPOOLUP_TIME,         /* Throttle spool-up time after arming (seconds) */
 
     /* Battery thresholds */
     PARAM_BATT_LOW_V,
