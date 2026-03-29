@@ -20,12 +20,14 @@
 #include "mavlink/mavlink_types.h"
 #include "mavlink/mavlink_msg.h"
 #include "../rpc/rpc_messages.h"
+#include "../common/flight_modes.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include <string.h>
+#include <math.h>
 
 static const char *TAG = "mavlink_handler";
 
@@ -62,6 +64,29 @@ static bool s_has_status    = false;
 static bool s_has_rc        = false;
 static bool s_has_servo     = false;
 
+/* Home position cache */
+static bool s_has_home = false;
+static int32_t s_home_lat = 0;
+static int32_t s_home_lon = 0;
+static int32_t s_home_alt = 0;
+
+/* Mission protocol state */
+typedef enum {
+    MISSION_STATE_IDLE = 0,
+    MISSION_STATE_UPLOADING,
+    MISSION_STATE_DOWNLOADING,
+} mission_state_t;
+
+#define MISSION_MAX_LOCAL 50
+static mavlink_mission_item_int_t s_mission_items[MISSION_MAX_LOCAL];
+static uint16_t s_mission_count = 0;
+static uint16_t s_mission_expected = 0;
+static uint16_t s_mission_received = 0;
+static uint16_t s_mission_current_seq = 0;
+static mission_state_t s_mission_state = MISSION_STATE_IDLE;
+static uint8_t s_mission_gcs_sysid = MAV_COMP_ID_GCS;
+static uint8_t s_mission_gcs_compid = 0;
+
 /* Timing for rate-limited sends */
 static uint32_t s_last_heartbeat_ms = 0;
 static uint32_t s_last_attitude_ms  = 0;
@@ -69,6 +94,8 @@ static uint32_t s_last_gps_ms       = 0;
 static uint32_t s_last_battery_ms   = 0;
 static uint32_t s_last_vfr_hud_ms   = 0;
 static uint32_t s_last_servo_ms     = 0;
+static uint32_t s_last_ext_state_ms = 0;
+static uint32_t s_last_home_ms      = 0;
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
@@ -150,6 +177,56 @@ static void drain_rpc_telemetry(void)
                 s_statustext_queue[s_statustext_count++] = telem;
             }
             break;
+        case RPC_MSG_HOME_POSITION:
+            s_home_lat = telem.data.home_position.lat;
+            s_home_lon = telem.data.home_position.lon;
+            s_home_alt = telem.data.home_position.alt;
+            s_has_home = true;
+            break;
+        case RPC_MSG_MISSION_COUNT: {
+            /* Core 0 is sending mission count for GCS download */
+            mavlink_message_t msg;
+            mavlink_msg_mission_count_encode(&msg, s_mission_gcs_sysid,
+                s_mission_gcs_compid, telem.data.mission_count.count,
+                MAV_MISSION_TYPE_MISSION);
+            send_mavlink_msg(&msg);
+            break;
+        }
+        case RPC_MSG_MISSION_ITEM: {
+            /* Core 0 sends mission item for GCS download */
+            mavlink_mission_item_int_t item;
+            memset(&item, 0, sizeof(item));
+            item.seq = telem.data.mission_item.seq;
+            item.frame = telem.data.mission_item.frame;
+            item.command = telem.data.mission_item.command;
+            item.current = telem.data.mission_item.current;
+            item.autocontinue = telem.data.mission_item.autocontinue;
+            item.param1 = telem.data.mission_item.param1;
+            item.param2 = telem.data.mission_item.param2;
+            item.param3 = telem.data.mission_item.param3;
+            item.param4 = telem.data.mission_item.param4;
+            item.x = telem.data.mission_item.x;
+            item.y = telem.data.mission_item.y;
+            item.z = telem.data.mission_item.z;
+            mavlink_message_t msg;
+            mavlink_msg_mission_item_int_encode(&msg, s_mission_gcs_sysid,
+                s_mission_gcs_compid, &item);
+            send_mavlink_msg(&msg);
+            break;
+        }
+        case RPC_MSG_MISSION_ACK: {
+            mavlink_message_t msg;
+            mavlink_msg_mission_ack_encode(&msg, s_mission_gcs_sysid,
+                s_mission_gcs_compid, telem.data.mission_ack.result,
+                MAV_MISSION_TYPE_MISSION);
+            send_mavlink_msg(&msg);
+            s_mission_state = MISSION_STATE_IDLE;
+            break;
+        }
+        case RPC_MSG_MISSION_CURRENT:
+            s_mission_current_seq = telem.data.mission_current.seq;
+            send_mission_current();
+            break;
         default:
             ESP_LOGW(TAG, "Unknown RPC telem type: 0x%02x", telem.msg_type);
             break;
@@ -159,30 +236,94 @@ static void drain_rpc_telemetry(void)
 
 /* ── Send MAVLink telemetry at configured rates ───────────────── */
 
+/* Map internal flight_mode_t to PX4 custom_mode encoding */
+static uint32_t flight_mode_to_px4_custom(uint8_t fm)
+{
+    switch (fm) {
+    case FLIGHT_MODE_MANUAL:    return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_MANUAL, 0);
+    case FLIGHT_MODE_STABILIZE: return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_STABILIZED, 0);
+    case FLIGHT_MODE_ALT_HOLD:  return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_ALTCTL, 0);
+    case FLIGHT_MODE_LOITER:    return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
+    case FLIGHT_MODE_RTH:       return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_RTL);
+    case FLIGHT_MODE_LAND:      return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_LAND);
+    case FLIGHT_MODE_ACRO:      return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_ACRO, 0);
+    case FLIGHT_MODE_MISSION:   return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+    default:                    return PX4_CUSTOM_MODE(PX4_CUSTOM_MAIN_MODE_MANUAL, 0);
+    }
+}
+
+/* Map internal flight_mode_t to PX4 base_mode flags */
+static uint8_t flight_mode_to_base_mode(uint8_t fm, bool armed)
+{
+    uint8_t base = MAV_MODE_FLAG_CUSTOM_MODE_ENABLED;
+
+    switch (fm) {
+    case FLIGHT_MODE_LOITER:
+    case FLIGHT_MODE_RTH:
+    case FLIGHT_MODE_LAND:
+    case FLIGHT_MODE_MISSION:
+        /* Auto modes */
+        base |= MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_GUIDED_ENABLED
+              | MAV_MODE_FLAG_AUTO_ENABLED;
+        break;
+    default:
+        /* Manual/Stabilize/AltHold/Acro */
+        base |= MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_MANUAL_INPUT_ENABLED;
+        break;
+    }
+
+    if (armed) {
+        base |= MAV_MODE_FLAG_SAFETY_ARMED;
+    }
+    return base;
+}
+
+/* Map PX4 custom_mode from QGC SET_MODE back to flight_mode_t */
+static uint8_t px4_custom_to_flight_mode(uint32_t custom_mode)
+{
+    uint8_t main_mode = (custom_mode >> 16) & 0xFF;
+    uint8_t sub_mode  = (custom_mode >> 24) & 0xFF;
+
+    switch (main_mode) {
+    case PX4_CUSTOM_MAIN_MODE_MANUAL:     return FLIGHT_MODE_MANUAL;
+    case PX4_CUSTOM_MAIN_MODE_STABILIZED: return FLIGHT_MODE_STABILIZE;
+    case PX4_CUSTOM_MAIN_MODE_ALTCTL:     return FLIGHT_MODE_ALT_HOLD;
+    case PX4_CUSTOM_MAIN_MODE_ACRO:       return FLIGHT_MODE_ACRO;
+    case PX4_CUSTOM_MAIN_MODE_AUTO:
+        switch (sub_mode) {
+        case PX4_CUSTOM_SUB_MODE_AUTO_LOITER:  return FLIGHT_MODE_LOITER;
+        case PX4_CUSTOM_SUB_MODE_AUTO_RTL:     return FLIGHT_MODE_RTH;
+        case PX4_CUSTOM_SUB_MODE_AUTO_LAND:    return FLIGHT_MODE_LAND;
+        case PX4_CUSTOM_SUB_MODE_AUTO_MISSION: return FLIGHT_MODE_MISSION;
+        default:                               return FLIGHT_MODE_LOITER;
+        }
+    case PX4_CUSTOM_MAIN_MODE_POSCTL: return FLIGHT_MODE_LOITER;
+    default:                          return FLIGHT_MODE_MANUAL;
+    }
+}
+
 static void send_heartbeat(void)
 {
     if (!rate_check(&s_last_heartbeat_ms, s_config.heartbeat_hz)) {
         return;
     }
 
-    uint8_t base_mode = MAV_MODE_FLAG_CUSTOM_MODE_ENABLED;
     uint8_t system_status = MAV_STATE_STANDBY;
-    uint32_t custom_mode = 0;
+    uint8_t fm = FLIGHT_MODE_MANUAL;
+    bool armed = false;
 
     if (s_has_status) {
-        if (s_latest_status.data.status.armed) {
-            base_mode |= MAV_MODE_FLAG_SAFETY_ARMED;
-            system_status = MAV_STATE_ACTIVE;
-        }
-        custom_mode = s_latest_status.data.status.flight_mode;
-
-        if (s_latest_status.data.status.failsafe != 0) {
-            system_status = MAV_STATE_CRITICAL;
-        }
+        armed = s_latest_status.data.status.armed;
+        fm = s_latest_status.data.status.flight_mode;
+        if (armed) system_status = MAV_STATE_ACTIVE;
+        if (s_latest_status.data.status.failsafe != 0) system_status = MAV_STATE_CRITICAL;
     }
 
+    uint32_t custom_mode = flight_mode_to_px4_custom(fm);
+    uint8_t base_mode = flight_mode_to_base_mode(fm, armed);
+
     mavlink_message_t msg;
-    mavlink_msg_heartbeat_encode(&msg, MAV_TYPE_HELICOPTER, MAV_AUTOPILOT_GENERIC,
+    mavlink_msg_heartbeat_encode(&msg, MAV_TYPE_HELICOPTER, MAV_AUTOPILOT_PX4,
                                  base_mode, custom_mode, system_status);
     send_mavlink_msg(&msg);
 }
@@ -348,6 +489,65 @@ static void send_param_values(void)
     s_param_value_count = 0;
 }
 
+static void send_extended_sys_state(void)
+{
+    if (!rate_check(&s_last_ext_state_ms, 1)) { /* 1 Hz */
+        return;
+    }
+
+    uint8_t landed = MAV_LANDED_STATE_ON_GROUND;
+    if (s_has_status && s_latest_status.data.status.armed) {
+        landed = MAV_LANDED_STATE_IN_AIR;
+    }
+
+    mavlink_message_t msg;
+    mavlink_msg_extended_sys_state_encode(&msg, MAV_VTOL_STATE_UNDEFINED, landed);
+    send_mavlink_msg(&msg);
+}
+
+static void send_home_position(void)
+{
+    if (!s_has_home || !rate_check(&s_last_home_ms, 1)) { /* 1 Hz */
+        return;
+    }
+
+    float q[4] = {1.0f, 0.0f, 0.0f, 0.0f}; /* identity quaternion */
+    mavlink_message_t msg;
+    mavlink_msg_home_position_encode(&msg,
+        s_home_lat, s_home_lon, s_home_alt,
+        0.0f, 0.0f, 0.0f, q,
+        0.0f, 0.0f, 0.0f,
+        (uint64_t)get_time_ms() * 1000ULL);
+    send_mavlink_msg(&msg);
+}
+
+static void send_mission_current(void)
+{
+    mavlink_message_t msg;
+    mavlink_msg_mission_current_encode(&msg, s_mission_current_seq);
+    send_mavlink_msg(&msg);
+}
+
+static void send_autopilot_version(void)
+{
+    uint64_t cap = MAV_PROTOCOL_CAPABILITY_MISSION_INT
+                 | MAV_PROTOCOL_CAPABILITY_PARAM_FLOAT
+                 | MAV_PROTOCOL_CAPABILITY_SET_ATTITUDE_TARGET
+                 | MAV_PROTOCOL_CAPABILITY_MAVLINK2;
+
+    uint8_t custom_ver[8] = {0};
+    mavlink_message_t msg;
+    mavlink_msg_autopilot_version_encode(&msg, cap,
+        0x01000000, /* flight_sw v1.0.0 */
+        0x01000000, /* middleware v1.0.0 */
+        0x05030000, /* os: ESP-IDF v5.3 */
+        1,          /* board_version */
+        custom_ver,
+        0x00000001  /* uid */
+    );
+    send_mavlink_msg(&msg);
+}
+
 static void send_telemetry(void)
 {
     send_heartbeat();
@@ -356,6 +556,8 @@ static void send_telemetry(void)
     send_battery();
     send_vfr_hud();
     send_servo_output();
+    send_extended_sys_state();
+    send_home_position();
     send_param_values();
     send_statustext_messages();
 }
@@ -396,21 +598,26 @@ static void handle_command_long(const mavlink_message_t *msg)
         ESP_LOGI(TAG, "ARM/DISARM command: %s", param1 >= 0.5f ? "ARM" : "DISARM");
         break;
 
-    case MAV_CMD_DO_SET_MODE:
+    case MAV_CMD_DO_SET_MODE: {
+        /* QGC sends param1=base_mode, param2=custom_mode (PX4 encoding) */
+        uint32_t cm = (uint32_t)param2;
+        uint8_t fm = px4_custom_to_flight_mode(cm);
         rpc_cmd.msg_type = RPC_CMD_SET_MODE;
-        rpc_cmd.data.mode_cmd.mode = (uint8_t)param2;
-        ESP_LOGI(TAG, "SET_MODE command: mode=%d", rpc_cmd.data.mode_cmd.mode);
+        rpc_cmd.data.mode_cmd.mode = fm;
+        ESP_LOGI(TAG, "SET_MODE: custom_mode=0x%08lx -> flight_mode=%d",
+                 (unsigned long)cm, fm);
         break;
+    }
 
     case MAV_CMD_NAV_RETURN_TO_LAUNCH:
         rpc_cmd.msg_type = RPC_CMD_SET_MODE;
-        rpc_cmd.data.mode_cmd.mode = 5; /* FLIGHT_MODE_RTH */
+        rpc_cmd.data.mode_cmd.mode = FLIGHT_MODE_RTH;
         ESP_LOGI(TAG, "NAV_RETURN_TO_LAUNCH -> RTH mode");
         break;
 
     case MAV_CMD_NAV_LAND:
         rpc_cmd.msg_type = RPC_CMD_SET_MODE;
-        rpc_cmd.data.mode_cmd.mode = 6; /* FLIGHT_MODE_LAND */
+        rpc_cmd.data.mode_cmd.mode = FLIGHT_MODE_LAND;
         ESP_LOGI(TAG, "NAV_LAND -> LAND mode");
         break;
 
@@ -424,11 +631,23 @@ static void handle_command_long(const mavlink_message_t *msg)
         break;
 
     case MAV_CMD_PREFLIGHT_CALIBRATION:
-        /* Acknowledge but note calibration is not yet implemented */
         ESP_LOGI(TAG, "CALIBRATION command (not implemented yet)");
         result = MAV_RESULT_ACCEPTED;
-        /* Don't send RPC for now - calibration logic TBD */
         rpc_cmd.msg_type = 0;
+        break;
+
+    case MAV_CMD_REQUEST_MESSAGE:
+        if ((uint32_t)param1 == MAVLINK_MSG_ID_AUTOPILOT_VERSION) {
+            send_autopilot_version();
+            result = MAV_RESULT_ACCEPTED;
+        } else if ((uint32_t)param1 == MAVLINK_MSG_ID_HOME_POSITION) {
+            /* Request home from Core 0 */
+            rpc_cmd.msg_type = RPC_CMD_REQUEST_HOME_POSITION;
+            result = MAV_RESULT_ACCEPTED;
+        } else {
+            result = MAV_RESULT_UNSUPPORTED;
+        }
+        rpc_cmd.msg_type = 0; /* already handled inline */
         break;
 
     default:
@@ -554,6 +773,210 @@ static void handle_rc_channels_override(const mavlink_message_t *msg)
     }
 }
 
+/* ── Mission Protocol Handlers ────────────────────────────────── */
+
+static void handle_mission_request_list(const mavlink_message_t *msg)
+{
+    uint8_t target_system, target_component, mission_type;
+    mavlink_msg_mission_request_list_decode(msg, &target_system, &target_component, &mission_type);
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+    if (mission_type != MAV_MISSION_TYPE_MISSION) return;
+
+    s_mission_gcs_sysid = msg->sysid;
+    s_mission_gcs_compid = msg->compid;
+
+    /* Send mission count to GCS */
+    ESP_LOGI(TAG, "MISSION_REQUEST_LIST: count=%u", s_mission_count);
+    mavlink_message_t reply;
+    mavlink_msg_mission_count_encode(&reply, msg->sysid, msg->compid,
+                                     s_mission_count, MAV_MISSION_TYPE_MISSION);
+    send_mavlink_msg(&reply);
+    s_mission_state = MISSION_STATE_DOWNLOADING;
+}
+
+static void handle_mission_count(const mavlink_message_t *msg)
+{
+    uint16_t count;
+    uint8_t target_system, target_component, mission_type;
+    mavlink_msg_mission_count_decode(msg, &count, &target_system, &target_component, &mission_type);
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+    if (mission_type != MAV_MISSION_TYPE_MISSION) return;
+
+    s_mission_gcs_sysid = msg->sysid;
+    s_mission_gcs_compid = msg->compid;
+
+    if (count > MISSION_MAX_LOCAL) {
+        ESP_LOGW(TAG, "MISSION_COUNT: %u exceeds max %d", count, MISSION_MAX_LOCAL);
+        mavlink_message_t ack;
+        mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                       MAV_MISSION_NO_SPACE, MAV_MISSION_TYPE_MISSION);
+        send_mavlink_msg(&ack);
+        return;
+    }
+
+    ESP_LOGI(TAG, "MISSION_COUNT: expecting %u items", count);
+    s_mission_expected = count;
+    s_mission_received = 0;
+    s_mission_count = 0;
+    s_mission_state = MISSION_STATE_UPLOADING;
+
+    /* Request first item */
+    if (count > 0) {
+        mavlink_message_t req;
+        mavlink_msg_mission_request_int_encode(&req, msg->sysid, msg->compid,
+                                                0, MAV_MISSION_TYPE_MISSION);
+        send_mavlink_msg(&req);
+    } else {
+        mavlink_message_t ack;
+        mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                       MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_MISSION);
+        send_mavlink_msg(&ack);
+        s_mission_state = MISSION_STATE_IDLE;
+    }
+}
+
+static void handle_mission_item_int(const mavlink_message_t *msg)
+{
+    mavlink_mission_item_int_t item;
+    uint8_t target_system, target_component;
+    mavlink_msg_mission_item_int_decode(msg, &item, &target_system, &target_component);
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    if (s_mission_state != MISSION_STATE_UPLOADING) {
+        ESP_LOGW(TAG, "MISSION_ITEM_INT: not in upload state");
+        return;
+    }
+
+    if (item.seq >= MISSION_MAX_LOCAL) {
+        ESP_LOGW(TAG, "MISSION_ITEM_INT: seq %u out of range", item.seq);
+        return;
+    }
+
+    /* Store locally */
+    s_mission_items[item.seq] = item;
+    s_mission_received++;
+
+    ESP_LOGI(TAG, "MISSION_ITEM_INT: seq=%u cmd=%u (%.7f, %.7f, %.1f) [%u/%u]",
+             item.seq, item.command,
+             (double)item.x / 1e7, (double)item.y / 1e7, item.z,
+             s_mission_received, s_mission_expected);
+
+    /* Forward to Core 0 via RPC */
+    rpc_command_msg_t rpc_cmd;
+    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
+    rpc_cmd.msg_type = RPC_CMD_MISSION_ITEM;
+    rpc_cmd.timestamp_ms = get_time_ms();
+    rpc_cmd.data.mission_item_cmd.seq = item.seq;
+    rpc_cmd.data.mission_item_cmd.frame = item.frame;
+    rpc_cmd.data.mission_item_cmd.command = item.command;
+    rpc_cmd.data.mission_item_cmd.autocontinue = item.autocontinue;
+    rpc_cmd.data.mission_item_cmd.param1 = item.param1;
+    rpc_cmd.data.mission_item_cmd.param2 = item.param2;
+    rpc_cmd.data.mission_item_cmd.param3 = item.param3;
+    rpc_cmd.data.mission_item_cmd.param4 = item.param4;
+    rpc_cmd.data.mission_item_cmd.x = item.x;
+    rpc_cmd.data.mission_item_cmd.y = item.y;
+    rpc_cmd.data.mission_item_cmd.z = item.z;
+    rpc_send_command(s_rpc_ctx, &rpc_cmd);
+
+    if (s_mission_received >= s_mission_expected) {
+        /* Upload complete */
+        s_mission_count = s_mission_expected;
+        s_mission_current_seq = 0;
+        s_mission_state = MISSION_STATE_IDLE;
+
+        /* Tell Core 0 the total count */
+        rpc_command_msg_t cnt_cmd;
+        memset(&cnt_cmd, 0, sizeof(cnt_cmd));
+        cnt_cmd.msg_type = RPC_CMD_MISSION_COUNT;
+        cnt_cmd.timestamp_ms = get_time_ms();
+        cnt_cmd.data.mission_count_cmd.count = s_mission_count;
+        rpc_send_command(s_rpc_ctx, &cnt_cmd);
+
+        /* ACK to GCS */
+        mavlink_message_t ack;
+        mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                       MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_MISSION);
+        send_mavlink_msg(&ack);
+        ESP_LOGI(TAG, "Mission upload complete: %u items", s_mission_count);
+    } else {
+        /* Request next item */
+        mavlink_message_t req;
+        mavlink_msg_mission_request_int_encode(&req, msg->sysid, msg->compid,
+                                                s_mission_received, MAV_MISSION_TYPE_MISSION);
+        send_mavlink_msg(&req);
+    }
+}
+
+static void handle_mission_request_int(const mavlink_message_t *msg)
+{
+    uint16_t seq;
+    uint8_t target_system, target_component, mission_type;
+    mavlink_msg_mission_request_int_decode(msg, &seq, &target_system, &target_component, &mission_type);
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    if (seq >= s_mission_count) {
+        ESP_LOGW(TAG, "MISSION_REQUEST_INT: seq %u >= count %u", seq, s_mission_count);
+        return;
+    }
+
+    mavlink_message_t reply;
+    mavlink_msg_mission_item_int_encode(&reply, msg->sysid, msg->compid,
+                                        &s_mission_items[seq]);
+    send_mavlink_msg(&reply);
+}
+
+static void handle_mission_ack(const mavlink_message_t *msg)
+{
+    /* GCS acknowledges download complete */
+    s_mission_state = MISSION_STATE_IDLE;
+    ESP_LOGI(TAG, "MISSION_ACK received from GCS");
+}
+
+static void handle_mission_clear_all(const mavlink_message_t *msg)
+{
+    uint8_t target_system, target_component, mission_type;
+    mavlink_msg_mission_clear_all_decode(msg, &target_system, &target_component, &mission_type);
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    ESP_LOGI(TAG, "MISSION_CLEAR_ALL");
+    s_mission_count = 0;
+    s_mission_current_seq = 0;
+    s_mission_state = MISSION_STATE_IDLE;
+
+    /* Forward to Core 0 */
+    rpc_command_msg_t rpc_cmd;
+    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
+    rpc_cmd.msg_type = RPC_CMD_MISSION_CLEAR_ALL;
+    rpc_cmd.timestamp_ms = get_time_ms();
+    rpc_send_command(s_rpc_ctx, &rpc_cmd);
+
+    mavlink_message_t ack;
+    mavlink_msg_mission_ack_encode(&ack, msg->sysid, msg->compid,
+                                   MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_MISSION);
+    send_mavlink_msg(&ack);
+}
+
+static void handle_mission_set_current(const mavlink_message_t *msg)
+{
+    uint16_t seq;
+    uint8_t target_system, target_component;
+    mavlink_msg_mission_set_current_decode(msg, &seq, &target_system, &target_component);
+    if (target_system != 0 && target_system != MAV_SYS_ID) return;
+
+    ESP_LOGI(TAG, "MISSION_SET_CURRENT: seq=%u", seq);
+    s_mission_current_seq = seq;
+    send_mission_current();
+
+    /* Forward to Core 0 */
+    rpc_command_msg_t rpc_cmd;
+    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
+    rpc_cmd.msg_type = RPC_CMD_MISSION_SET_CURRENT;
+    rpc_cmd.timestamp_ms = get_time_ms();
+    rpc_cmd.data.mission_set_current_cmd.seq = seq;
+    rpc_send_command(s_rpc_ctx, &rpc_cmd);
+}
+
 static void process_mavlink_message(const mavlink_message_t *msg)
 {
     /* Ignore messages from ourselves */
@@ -579,6 +1002,27 @@ static void process_mavlink_message(const mavlink_message_t *msg)
         break;
     case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE:
         handle_rc_channels_override(msg);
+        break;
+    case MAVLINK_MSG_ID_MISSION_REQUEST_LIST:
+        handle_mission_request_list(msg);
+        break;
+    case MAVLINK_MSG_ID_MISSION_COUNT:
+        handle_mission_count(msg);
+        break;
+    case MAVLINK_MSG_ID_MISSION_ITEM_INT:
+        handle_mission_item_int(msg);
+        break;
+    case MAVLINK_MSG_ID_MISSION_REQUEST_INT:
+        handle_mission_request_int(msg);
+        break;
+    case MAVLINK_MSG_ID_MISSION_ACK:
+        handle_mission_ack(msg);
+        break;
+    case MAVLINK_MSG_ID_MISSION_CLEAR_ALL:
+        handle_mission_clear_all(msg);
+        break;
+    case MAVLINK_MSG_ID_MISSION_SET_CURRENT:
+        handle_mission_set_current(msg);
         break;
     default:
         ESP_LOGD(TAG, "Unhandled MAVLink msg ID: %lu from sys=%d comp=%d",
@@ -637,14 +1081,20 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     s_has_status = false;
     s_has_rc = false;
 
+    s_has_home = false;
+    s_mission_count = 0;
+    s_mission_state = MISSION_STATE_IDLE;
+
     uint32_t now = get_time_ms();
     s_last_heartbeat_ms  = now;
     s_last_attitude_ms   = now;
     s_last_gps_ms        = now;
     s_last_battery_ms    = now;
     s_last_vfr_hud_ms    = now;
+    s_last_ext_state_ms  = now;
+    s_last_home_ms       = now;
 
-    ESP_LOGI(TAG, "MAVLink handler initialized (HB=%dHz ATT=%dHz GPS=%dHz BAT=%dHz)",
+    ESP_LOGI(TAG, "PX4-compat MAVLink handler initialized (HB=%dHz ATT=%dHz GPS=%dHz BAT=%dHz)",
              s_config.heartbeat_hz, s_config.attitude_hz,
              s_config.gps_hz, s_config.battery_hz);
 }

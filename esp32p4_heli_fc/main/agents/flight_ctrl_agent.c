@@ -41,6 +41,7 @@
 #include "../control/attitude_control.h"
 #include "../control/rate_control.h"
 #include "../control/pos_control.h"
+#include "mission_mgr.h"
 
 static const char *TAG = "flight_ctrl";
 
@@ -63,6 +64,10 @@ static const char *TAG = "flight_ctrl";
 /* Simple GPS position error to attitude setpoint conversion */
 #define POS_KP              0.5f    /* position error (m) -> attitude angle (rad) */
 #define POS_MAX_ANGLE       DEG_TO_RAD(15.0f)  /* max tilt for position control */
+
+/* Mission mode parameters */
+#define MISSION_WP_RADIUS   3.0f    /* waypoint acceptance radius (meters) */
+#define MISSION_CLIMB_RATE  2.0f    /* m/s climb/descent to waypoint altitude */
 
 /* ── Helper: apply deadzone to RC stick ──────────────────────── */
 
@@ -178,6 +183,10 @@ static void flight_ctrl_task(void *param)
 
     /* RTH state machine */
     enum { RTH_CLIMB, RTH_TRANSIT, RTH_DESCEND, RTH_LAND } rth_phase = RTH_CLIMB;
+
+    /* Mission state */
+    uint16_t mission_wp_seq = 0;   /* sequence number being navigated to */
+    float mission_alt_sp = 0.0f;   /* target altitude for current waypoint */
 
     /* ---- Main loop at 500 Hz ---- */
     TickType_t last_wake = xTaskGetTickCount();
@@ -494,6 +503,158 @@ static void flight_ctrl_task(void *param)
             if (!land_detected) {
                 act.collective = constrain_f(collective_out, -1.0f, 1.0f);
                 act.throttle = constrain_f((collective_out + 1.0f) * 0.5f, 0.0f, 1.0f);
+            }
+            break;
+        }
+
+        case FLIGHT_MODE_MISSION: {
+            /* Autonomous waypoint mission mode.
+             * Navigates through mission items stored by mission_mgr.
+             * Falls back to LOITER if no mission or no GPS. */
+
+            if (mission_mgr_get_count() == 0 || gps.fix_type < 3) {
+                /* No mission uploaded or no GPS fix: hold position like LOITER */
+                if (prev_mode != FLIGHT_MODE_MISSION) {
+                    loiter_lat = gps.latitude;
+                    loiter_lon = gps.longitude;
+                    alt_hold_sp = pos.alt;
+                    pos_control_reset(&pos_ctrl);
+                    if (mission_mgr_get_count() == 0) {
+                        ESP_LOGW(TAG, "MISSION: no items, holding position");
+                    } else {
+                        ESP_LOGW(TAG, "MISSION: no GPS, holding position");
+                    }
+                }
+
+                float collective_out;
+                pos_control_update_altitude(&pos_ctrl, alt_hold_sp, pos.alt,
+                                            pos.climb_rate, &collective_out);
+
+                float att_sp[3] = {0.0f, 0.0f, 0.0f};
+                if (gps.fix_type >= 3) {
+                    float north_err, east_err;
+                    gps_distance_ne(gps.latitude, gps.longitude,
+                                   loiter_lat, loiter_lon,
+                                   &north_err, &east_err);
+                    float cos_yaw = cosf(att.yaw);
+                    float sin_yaw = sinf(att.yaw);
+                    float body_fwd = cos_yaw * north_err + sin_yaw * east_err;
+                    float body_right = -sin_yaw * north_err + cos_yaw * east_err;
+                    att_sp[1] = constrain_f(-body_fwd * POS_KP, -POS_MAX_ANGLE, POS_MAX_ANGLE);
+                    att_sp[0] = constrain_f(body_right * POS_KP, -POS_MAX_ANGLE, POS_MAX_ANGLE);
+                }
+
+                compute_stabilized_controls(&att_ctrl, &rate_ctrl, &att,
+                    att_sp, &yaw_sp, &yaw_sp_initialized, 0.0f, ctrl_dt, &act);
+                act.collective = constrain_f(collective_out, -1.0f, 1.0f);
+                act.throttle = constrain_f((collective_out + 1.0f) * 0.5f, 0.0f, 1.0f);
+                break;
+            }
+
+            /* Initialize on mode entry */
+            if (prev_mode != FLIGHT_MODE_MISSION) {
+                mission_wp_seq = mission_mgr_get_current();
+                pos_control_reset(&pos_ctrl);
+
+                const mission_item_t *wp = mission_mgr_get_item(mission_wp_seq);
+                if (wp != NULL) {
+                    mission_alt_sp = wp->z; /* target altitude from waypoint */
+                } else {
+                    mission_alt_sp = pos.alt;
+                }
+                ESP_LOGI(TAG, "MISSION: starting at wp %u/%d",
+                         mission_wp_seq, mission_mgr_get_count());
+            }
+
+            /* Check if mission is complete */
+            if (mission_mgr_is_complete()) {
+                /* All waypoints reached: hold position at last waypoint */
+                float collective_out;
+                pos_control_update_altitude(&pos_ctrl, mission_alt_sp, pos.alt,
+                                            pos.climb_rate, &collective_out);
+                float att_sp[3] = {0.0f, 0.0f, 0.0f};
+                compute_stabilized_controls(&att_ctrl, &rate_ctrl, &att,
+                    att_sp, &yaw_sp, &yaw_sp_initialized, 0.0f, ctrl_dt, &act);
+                act.collective = constrain_f(collective_out, -1.0f, 1.0f);
+                act.throttle = constrain_f((collective_out + 1.0f) * 0.5f, 0.0f, 1.0f);
+                break;
+            }
+
+            /* Navigate to current waypoint */
+            const mission_item_t *wp = mission_mgr_get_item(mission_wp_seq);
+            if (wp == NULL) {
+                /* Should not happen, but handle gracefully: advance past bad item */
+                mission_mgr_advance();
+                mission_wp_seq = mission_mgr_get_current();
+                float collective_out;
+                pos_control_update_altitude(&pos_ctrl, mission_alt_sp, pos.alt,
+                                            pos.climb_rate, &collective_out);
+                float att_sp[3] = {0.0f, 0.0f, 0.0f};
+                compute_stabilized_controls(&att_ctrl, &rate_ctrl, &att,
+                    att_sp, &yaw_sp, &yaw_sp_initialized, 0.0f, ctrl_dt, &act);
+                act.collective = constrain_f(collective_out, -1.0f, 1.0f);
+                act.throttle = constrain_f((collective_out + 1.0f) * 0.5f, 0.0f, 1.0f);
+                break;
+            }
+
+            /* Waypoint target position (degE7 -> degrees) */
+            double wp_lat = (double)wp->x / 1e7;
+            double wp_lon = (double)wp->y / 1e7;
+            float wp_alt  = wp->z;
+
+            /* Ramp altitude toward waypoint altitude */
+            if (mission_alt_sp < wp_alt) {
+                mission_alt_sp += MISSION_CLIMB_RATE * ctrl_dt;
+                if (mission_alt_sp > wp_alt) mission_alt_sp = wp_alt;
+            } else if (mission_alt_sp > wp_alt) {
+                mission_alt_sp -= MISSION_CLIMB_RATE * ctrl_dt;
+                if (mission_alt_sp < wp_alt) mission_alt_sp = wp_alt;
+            }
+
+            /* Altitude control */
+            float collective_out;
+            pos_control_update_altitude(&pos_ctrl, mission_alt_sp, pos.alt,
+                                        pos.climb_rate, &collective_out);
+
+            /* Horizontal navigation toward waypoint */
+            float north_err, east_err;
+            gps_distance_ne(gps.latitude, gps.longitude,
+                           wp_lat, wp_lon,
+                           &north_err, &east_err);
+            float dist_to_wp = sqrtf(north_err * north_err + east_err * east_err);
+
+            float att_sp[3] = {0.0f, 0.0f, 0.0f};
+            float cos_yaw = cosf(att.yaw);
+            float sin_yaw = sinf(att.yaw);
+            float body_fwd = cos_yaw * north_err + sin_yaw * east_err;
+            float body_right = -sin_yaw * north_err + cos_yaw * east_err;
+
+            att_sp[1] = constrain_f(-body_fwd * POS_KP, -POS_MAX_ANGLE, POS_MAX_ANGLE);
+            att_sp[0] = constrain_f(body_right * POS_KP, -POS_MAX_ANGLE, POS_MAX_ANGLE);
+
+            compute_stabilized_controls(&att_ctrl, &rate_ctrl, &att,
+                att_sp, &yaw_sp, &yaw_sp_initialized, 0.0f, ctrl_dt, &act);
+            act.collective = constrain_f(collective_out, -1.0f, 1.0f);
+            act.throttle = constrain_f((collective_out + 1.0f) * 0.5f, 0.0f, 1.0f);
+
+            /* Waypoint reached check */
+            float alt_err = fabsf(pos.alt - wp_alt);
+            if (dist_to_wp < MISSION_WP_RADIUS && alt_err < MISSION_WP_RADIUS) {
+                ESP_LOGI(TAG, "MISSION: wp %u reached (dist=%.1f alt_err=%.1f)",
+                         mission_wp_seq, dist_to_wp, alt_err);
+
+                if (wp->autocontinue) {
+                    mission_mgr_advance();
+                    mission_wp_seq = mission_mgr_get_current();
+                    const mission_item_t *next = mission_mgr_get_item(mission_wp_seq);
+                    if (next != NULL) {
+                        ESP_LOGI(TAG, "MISSION: advancing to wp %u", mission_wp_seq);
+                    } else {
+                        ESP_LOGI(TAG, "MISSION: complete, holding position");
+                    }
+                }
+                /* If autocontinue is false, hold at this waypoint until
+                 * GCS sends MISSION_SET_CURRENT to advance */
             }
             break;
         }

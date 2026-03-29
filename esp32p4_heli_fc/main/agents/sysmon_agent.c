@@ -640,6 +640,132 @@ static void sysmon_task(void *param)
                     }
                     break;
 
+                case RPC_CMD_MISSION_COUNT: {
+                    uint16_t count = cmd.data.mission_count_cmd.count;
+                    ESP_LOGI(TAG, "MISSION_COUNT: expecting %u items", count);
+                    mission_mgr_set_count(count);
+
+                    /* ACK the count to GCS (MAV_MISSION_ACCEPTED = 0) */
+                    rpc_telemetry_msg_t ack;
+                    memset(&ack, 0, sizeof(ack));
+                    ack.msg_type = RPC_MSG_MISSION_ACK;
+                    ack.timestamp_ms = now_ms;
+                    ack.data.mission_ack.result = 0; /* MAV_MISSION_ACCEPTED */
+                    rpc_send_telemetry(rpc, &ack);
+                    break;
+                }
+
+                case RPC_CMD_MISSION_ITEM: {
+                    uint16_t seq = cmd.data.mission_item_cmd.seq;
+                    mission_item_t item;
+                    item.seq          = seq;
+                    item.frame        = cmd.data.mission_item_cmd.frame;
+                    item.command      = cmd.data.mission_item_cmd.command;
+                    item.autocontinue = cmd.data.mission_item_cmd.autocontinue;
+                    item.param1       = cmd.data.mission_item_cmd.param1;
+                    item.param2       = cmd.data.mission_item_cmd.param2;
+                    item.param3       = cmd.data.mission_item_cmd.param3;
+                    item.param4       = cmd.data.mission_item_cmd.param4;
+                    item.x            = cmd.data.mission_item_cmd.x;
+                    item.y            = cmd.data.mission_item_cmd.y;
+                    item.z            = cmd.data.mission_item_cmd.z;
+                    mission_mgr_store_item(seq, &item);
+
+                    /* ACK each item */
+                    rpc_telemetry_msg_t ack;
+                    memset(&ack, 0, sizeof(ack));
+                    ack.msg_type = RPC_MSG_MISSION_ACK;
+                    ack.timestamp_ms = now_ms;
+                    ack.data.mission_ack.result = 0; /* MAV_MISSION_ACCEPTED */
+                    rpc_send_telemetry(rpc, &ack);
+                    break;
+                }
+
+                case RPC_CMD_MISSION_REQUEST_LIST: {
+                    ESP_LOGI(TAG, "MISSION_REQUEST_LIST: sending count=%d",
+                             mission_mgr_get_count());
+
+                    /* Send mission count */
+                    rpc_telemetry_msg_t cnt_msg;
+                    memset(&cnt_msg, 0, sizeof(cnt_msg));
+                    cnt_msg.msg_type = RPC_MSG_MISSION_COUNT;
+                    cnt_msg.timestamp_ms = now_ms;
+                    cnt_msg.data.mission_count.count = (uint16_t)mission_mgr_get_count();
+                    rpc_send_telemetry(rpc, &cnt_msg);
+
+                    /* Send each stored item */
+                    for (int i = 0; i < mission_mgr_get_count(); i++) {
+                        const mission_item_t *mi = mission_mgr_get_item((uint16_t)i);
+                        if (mi == NULL) continue;
+
+                        rpc_telemetry_msg_t item_msg;
+                        memset(&item_msg, 0, sizeof(item_msg));
+                        item_msg.msg_type = RPC_MSG_MISSION_ITEM;
+                        item_msg.timestamp_ms = now_ms;
+                        item_msg.data.mission_item.seq          = mi->seq;
+                        item_msg.data.mission_item.frame        = mi->frame;
+                        item_msg.data.mission_item.command      = mi->command;
+                        item_msg.data.mission_item.current      = (mi->seq == mission_mgr_get_current()) ? 1 : 0;
+                        item_msg.data.mission_item.autocontinue = mi->autocontinue;
+                        item_msg.data.mission_item.param1       = mi->param1;
+                        item_msg.data.mission_item.param2       = mi->param2;
+                        item_msg.data.mission_item.param3       = mi->param3;
+                        item_msg.data.mission_item.param4       = mi->param4;
+                        item_msg.data.mission_item.x            = mi->x;
+                        item_msg.data.mission_item.y            = mi->y;
+                        item_msg.data.mission_item.z            = mi->z;
+                        rpc_send_telemetry(rpc, &item_msg);
+                    }
+                    break;
+                }
+
+                case RPC_CMD_MISSION_CLEAR_ALL:
+                    ESP_LOGI(TAG, "MISSION_CLEAR_ALL");
+                    mission_mgr_clear();
+                    {
+                        rpc_telemetry_msg_t ack;
+                        memset(&ack, 0, sizeof(ack));
+                        ack.msg_type = RPC_MSG_MISSION_ACK;
+                        ack.timestamp_ms = now_ms;
+                        ack.data.mission_ack.result = 0; /* MAV_MISSION_ACCEPTED */
+                        rpc_send_telemetry(rpc, &ack);
+                    }
+                    send_statustext_rpc(rpc, MAV_SEVERITY_INFO, "Mission cleared");
+                    break;
+
+                case RPC_CMD_MISSION_SET_CURRENT: {
+                    uint16_t seq = cmd.data.mission_set_current_cmd.seq;
+                    ESP_LOGI(TAG, "MISSION_SET_CURRENT: seq=%u", seq);
+                    mission_mgr_set_current(seq);
+
+                    /* Confirm the new current item to GCS */
+                    rpc_telemetry_msg_t cur_msg;
+                    memset(&cur_msg, 0, sizeof(cur_msg));
+                    cur_msg.msg_type = RPC_MSG_MISSION_CURRENT;
+                    cur_msg.timestamp_ms = now_ms;
+                    cur_msg.data.mission_current.seq = mission_mgr_get_current();
+                    rpc_send_telemetry(rpc, &cur_msg);
+                    break;
+                }
+
+                case RPC_CMD_REQUEST_HOME_POSITION: {
+                    ESP_LOGI(TAG, "REQUEST_HOME_POSITION");
+                    if (home_set) {
+                        rpc_telemetry_msg_t hmsg;
+                        memset(&hmsg, 0, sizeof(hmsg));
+                        hmsg.msg_type = RPC_MSG_HOME_POSITION;
+                        hmsg.timestamp_ms = now_ms;
+                        hmsg.data.home_position.lat = (int32_t)(home_lat * 1e7);
+                        hmsg.data.home_position.lon = (int32_t)(home_lon * 1e7);
+                        hmsg.data.home_position.alt = (int32_t)(home_alt_msl * 1000.0f);
+                        rpc_send_telemetry(rpc, &hmsg);
+                    } else {
+                        send_statustext_rpc(rpc, MAV_SEVERITY_WARNING,
+                                            "Home position not set");
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -685,6 +811,18 @@ static void sysmon_task(void *param)
 
             /* Vehicle status */
             rpc_telem_send_status(rpc, &status_msg);
+
+            /* Periodic MISSION_CURRENT when in mission mode */
+            if (flight_mode == FLIGHT_MODE_MISSION &&
+                (now_ms - last_mission_current_ms) >= MISSION_CURRENT_INTERVAL_MS) {
+                last_mission_current_ms = now_ms;
+                rpc_telemetry_msg_t mc_msg;
+                memset(&mc_msg, 0, sizeof(mc_msg));
+                mc_msg.msg_type = RPC_MSG_MISSION_CURRENT;
+                mc_msg.timestamp_ms = now_ms;
+                mc_msg.data.mission_current.seq = mission_mgr_get_current();
+                rpc_send_telemetry(rpc, &mc_msg);
+            }
         }
 
         /* ---- 6. LED indication ---- */
