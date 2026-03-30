@@ -54,7 +54,7 @@
 
 /* ── I2C Addresses ───────────────────────────────────────────── */
 #define BMP390_I2C_ADDR     0x77
-#define LIS3MDL_I2C_ADDR    0x1E      /* SDO/SA1 = HIGH */
+#define LIS3MDL_I2C_ADDR    0x1C      /* SDO/SA1 = GND (confirmed by bus scan) */
 #define MPRLS_I2C_ADDR      0x18      /* Honeywell MPRLS differential pressure */
 
 /* ── Task Priorities ─────────────────────────────────────────── */
