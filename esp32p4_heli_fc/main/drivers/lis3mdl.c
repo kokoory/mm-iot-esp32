@@ -66,11 +66,11 @@ int lis3mdl_init(lis3mdl_t *dev, i2c_master_bus_handle_t bus, uint8_t addr)
         return -1;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(20));
 
     /* Software reset via CTRL_REG2 */
     lis3mdl_write_reg(dev, LIS3MDL_REG_CTRL_REG2, 0x04); /* SOFT_RST bit */
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     /* Read WHO_AM_I (0x0F should return 0x3D) */
     uint8_t who = 0;
@@ -85,52 +85,43 @@ int lis3mdl_init(lis3mdl_t *dev, i2c_master_bus_handle_t bus, uint8_t addr)
     return 0;
 }
 
+/* Write register with retry */
+static esp_err_t lis3mdl_write_reg_retry(lis3mdl_t *dev, uint8_t reg, uint8_t val)
+{
+    for (int attempt = 0; attempt < 3; attempt++) {
+        esp_err_t ret = lis3mdl_write_reg(dev, reg, val);
+        if (ret == ESP_OK) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    ESP_LOGE(TAG, "write reg 0x%02X failed after 3 retries", reg);
+    return ESP_FAIL;
+}
+
 int lis3mdl_configure(lis3mdl_t *dev)
 {
-    /*
-     * CTRL_REG1 (0x20):
-     *   [7]   TEMP_EN = 1 (enable temperature sensor)
-     *   [6:5] OM      = 11 (ultra-high performance for X/Y)
-     *   [4:2] DO      = 111 (80 Hz ODR)
-     *   [1]   FAST_ODR = 0
-     *   [0]   ST      = 0
-     *
-     *   = 0b1_11_111_0_0 = 0xFC
-     */
-    lis3mdl_write_reg(dev, LIS3MDL_REG_CTRL_REG1, 0xFC);
+    esp_err_t ret;
 
-    /*
-     * CTRL_REG2 (0x21):
-     *   [6:5] FS = 01 (±8 Gauss)
-     *   Others = 0
-     *   => 0x20
-     */
-    lis3mdl_write_reg(dev, LIS3MDL_REG_CTRL_REG2, 0x20);
+    /* CTRL_REG1: ultra-high perf X/Y, 80Hz ODR, temp enable */
+    ret = lis3mdl_write_reg_retry(dev, LIS3MDL_REG_CTRL_REG1, 0xFC);
+    if (ret != ESP_OK) return -1;
 
-    /*
-     * CTRL_REG3 (0x22):
-     *   [1:0] MD = 00 (continuous-conversion mode)
-     *   Others = 0
-     *   => 0x00
-     */
-    lis3mdl_write_reg(dev, LIS3MDL_REG_CTRL_REG3, 0x00);
+    /* CTRL_REG2: ±8 Gauss */
+    ret = lis3mdl_write_reg_retry(dev, LIS3MDL_REG_CTRL_REG2, 0x20);
+    if (ret != ESP_OK) return -1;
 
-    /*
-     * CTRL_REG4 (0x23):
-     *   [3:2] OMZ = 11 (ultra-high performance for Z)
-     *   [1]   BLE = 0 (little-endian)
-     *   => 0x0C
-     */
-    lis3mdl_write_reg(dev, LIS3MDL_REG_CTRL_REG4, 0x0C);
+    /* CTRL_REG3: continuous-conversion mode */
+    ret = lis3mdl_write_reg_retry(dev, LIS3MDL_REG_CTRL_REG3, 0x00);
+    if (ret != ESP_OK) return -1;
 
-    /*
-     * CTRL_REG5 (0x24):
-     *   [6] BDU = 1 (block data update until both L/H read)
-     *   => 0x40
-     */
-    lis3mdl_write_reg(dev, LIS3MDL_REG_CTRL_REG5, 0x40);
+    /* CTRL_REG4: ultra-high perf Z, little-endian */
+    ret = lis3mdl_write_reg_retry(dev, LIS3MDL_REG_CTRL_REG4, 0x0C);
+    if (ret != ESP_OK) return -1;
 
-    vTaskDelay(pdMS_TO_TICKS(5));
+    /* CTRL_REG5: BDU enabled */
+    ret = lis3mdl_write_reg_retry(dev, LIS3MDL_REG_CTRL_REG5, 0x40);
+    if (ret != ESP_OK) return -1;
+
+    vTaskDelay(pdMS_TO_TICKS(10));
 
     ESP_LOGI(TAG, "configured: ultra-high perf, 80Hz, +/-8G, continuous");
     return 0;

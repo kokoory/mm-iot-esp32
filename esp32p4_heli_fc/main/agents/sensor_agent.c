@@ -124,29 +124,48 @@ static void sensor_task(void *param)
     }
     ESP_LOGI(TAG, "I2C scan complete");
 
-    /* ---- Initialize sensors (exclusive I2C access) ---- */
-    bool imu_ok = (ism330dhc_init(&s_imu, i2c_bus, ISM330DHC_I2C_ADDR) == 0);
-    if (imu_ok) {
-        imu_ok = (ism330dhc_configure(&s_imu) == 0);
+    /* ---- Initialize sensors with retries (I2C bus unreliable with internal pull-ups) ---- */
+    #define SENSOR_INIT_MAX_ATTEMPTS 5
+
+    bool imu_ok = false;
+    for (int attempt = 0; attempt < SENSOR_INIT_MAX_ATTEMPTS && !imu_ok; attempt++) {
+        if (attempt > 0) {
+            ESP_LOGW(TAG, "IMU init retry %d/%d...", attempt + 1, SENSOR_INIT_MAX_ATTEMPTS);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        imu_ok = (ism330dhc_init(&s_imu, i2c_bus, ISM330DHC_I2C_ADDR) == 0);
+        if (imu_ok) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            imu_ok = (ism330dhc_configure(&s_imu) == 0);
+        }
     }
     if (imu_ok) {
         ESP_LOGI(TAG, "IMU (ISM330DHC) initialized");
     } else {
-        ESP_LOGE(TAG, "IMU init/configure FAILED");
+        ESP_LOGE(TAG, "IMU init/configure FAILED after %d attempts", SENSOR_INIT_MAX_ATTEMPTS);
     }
 
-    /* BMP390 disabled — suspected I2C bus interference (all sensors read 0x77) */
-    bool baro_ok = false;
-    ESP_LOGW(TAG, "Baro (BMP390) DISABLED for I2C bus debugging");
+    vTaskDelay(pdMS_TO_TICKS(50));
 
-    bool mag_ok = (lis3mdl_init(&s_mag, i2c_bus, LIS3MDL_I2C_ADDR) == 0);
-    if (mag_ok) {
-        mag_ok = (lis3mdl_configure(&s_mag) == 0);
+    /* BMP390 disabled — not connected */
+    bool baro_ok = false;
+
+    bool mag_ok = false;
+    for (int attempt = 0; attempt < SENSOR_INIT_MAX_ATTEMPTS && !mag_ok; attempt++) {
+        if (attempt > 0) {
+            ESP_LOGW(TAG, "Mag init retry %d/%d...", attempt + 1, SENSOR_INIT_MAX_ATTEMPTS);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        mag_ok = (lis3mdl_init(&s_mag, i2c_bus, LIS3MDL_I2C_ADDR) == 0);
+        if (mag_ok) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            mag_ok = (lis3mdl_configure(&s_mag) == 0);
+        }
     }
     if (mag_ok) {
         ESP_LOGI(TAG, "Mag (LIS3MDL) initialized");
     } else {
-        ESP_LOGE(TAG, "Mag init/configure FAILED");
+        ESP_LOGE(TAG, "Mag init/configure FAILED after %d attempts", SENSOR_INIT_MAX_ATTEMPTS);
     }
 
     /* MPRLS not physically connected */
