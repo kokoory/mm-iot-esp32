@@ -2,9 +2,8 @@
  * Sensor Manager Agent Implementation
  *
  * Runs on Core 0 at 1 kHz.
- *   - IMU (ISM330DHC via SPI) read every cycle (1 kHz)
- *   - Barometer (BMP390 via I2C) read every 10th cycle (100 Hz)
- *   - Magnetometer (LIS3MDL via I2C) read every 10th cycle, offset by 5 (100 Hz)
+ *   - IMU (ISM330DHCX via SPI) read every cycle (1 kHz)
+ *   - Magnetometer (LIS3MDL via SPI) read every 10th cycle, offset by 5 (100 Hz)
  *   - GPS (NMEA via UART) read in gps_init internal task, polled here for publishing
  *   - AHRS update every cycle with IMU data
  *   - Altitude estimator updated with baro and accel data
@@ -20,7 +19,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "driver/i2c_master.h"
+#include "driver/spi_master.h"
 #include "driver/gpio.h"
 
 #include "../common/board_config.h"
@@ -79,25 +78,25 @@ static bool  s_imu_filt_initialized = false;
 #define IMU_GYRO_FILTER_ALPHA  0.9f
 
 /* ------------------------------------------------------------------ */
-static i2c_master_bus_handle_t init_i2c_bus(void)
+static esp_err_t init_sensor_spi_bus(void)
 {
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = I2C_PORT,
-        .sda_io_num = PIN_I2C_SDA,
-        .scl_io_num = PIN_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = PIN_SENSOR_SPI_MOSI,
+        .miso_io_num = PIN_SENSOR_SPI_MISO,
+        .sclk_io_num = PIN_SENSOR_SPI_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 64,
     };
 
-    i2c_master_bus_handle_t bus = NULL;
-    esp_err_t err = i2c_new_master_bus(&bus_cfg, &bus);
+    esp_err_t err = spi_bus_initialize(SENSOR_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(err));
-        return NULL;
+        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
+        return err;
     }
-    ESP_LOGI(TAG, "I2C bus initialized");
-    return bus;
+    ESP_LOGI(TAG, "Sensor SPI bus initialized (SCLK=%d, MOSI=%d, MISO=%d)",
+             PIN_SENSOR_SPI_SCLK, PIN_SENSOR_SPI_MOSI, PIN_SENSOR_SPI_MISO);
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -105,74 +104,40 @@ static void sensor_task(void *param)
 {
     (void)param;
 
-    /* ---- Initialize I2C bus ---- */
-    i2c_master_bus_handle_t i2c_bus = init_i2c_bus();
-    if (!i2c_bus) {
-        ESP_LOGE(TAG, "I2C init failed, task aborting");
+    /* ---- Initialize sensor SPI bus ---- */
+    if (init_sensor_spi_bus() != ESP_OK) {
+        ESP_LOGE(TAG, "SPI init failed, task aborting");
         vTaskDelete(NULL);
         return;
     }
 
-    /* ---- I2C bus scan for debugging ---- */
-    ESP_LOGI(TAG, "Scanning I2C bus...");
-    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        uint8_t dummy;
-        esp_err_t ret = i2c_master_probe(i2c_bus, addr, 50);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "  I2C device found at 0x%02X", addr);
-        }
-    }
-    ESP_LOGI(TAG, "I2C scan complete");
-
-    /* ---- Initialize sensors with retries (I2C bus unreliable with internal pull-ups) ---- */
-    #define SENSOR_INIT_MAX_ATTEMPTS 5
-
-    bool imu_ok = false;
-    for (int attempt = 0; attempt < SENSOR_INIT_MAX_ATTEMPTS && !imu_ok; attempt++) {
-        if (attempt > 0) {
-            ESP_LOGW(TAG, "IMU init retry %d/%d...", attempt + 1, SENSOR_INIT_MAX_ATTEMPTS);
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        imu_ok = (ism330dhc_init(&s_imu, i2c_bus, ISM330DHC_I2C_ADDR) == 0);
-        if (imu_ok) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            imu_ok = (ism330dhc_configure(&s_imu) == 0);
-        }
+    /* ---- Initialize sensors via SPI ---- */
+    bool imu_ok = (ism330dhc_init(&s_imu, SENSOR_SPI_HOST, PIN_SENSOR_CS_IMU) == 0);
+    if (imu_ok) {
+        imu_ok = (ism330dhc_configure(&s_imu) == 0);
     }
     if (imu_ok) {
-        ESP_LOGI(TAG, "IMU (ISM330DHC) initialized");
+        ESP_LOGI(TAG, "IMU (ISM330DHCX) initialized via SPI");
     } else {
-        ESP_LOGE(TAG, "IMU init/configure FAILED after %d attempts", SENSOR_INIT_MAX_ATTEMPTS);
+        ESP_LOGE(TAG, "IMU init/configure FAILED");
     }
 
-    vTaskDelay(pdMS_TO_TICKS(50));
+    bool baro_ok = false;  /* BMP390 not connected */
 
-    /* BMP390 disabled — not connected */
-    bool baro_ok = false;
-
-    bool mag_ok = false;
-    for (int attempt = 0; attempt < SENSOR_INIT_MAX_ATTEMPTS && !mag_ok; attempt++) {
-        if (attempt > 0) {
-            ESP_LOGW(TAG, "Mag init retry %d/%d...", attempt + 1, SENSOR_INIT_MAX_ATTEMPTS);
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        mag_ok = (lis3mdl_init(&s_mag, i2c_bus, LIS3MDL_I2C_ADDR) == 0);
-        if (mag_ok) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            mag_ok = (lis3mdl_configure(&s_mag) == 0);
-        }
+    bool mag_ok = (lis3mdl_init(&s_mag, SENSOR_SPI_HOST, PIN_SENSOR_CS_MAG) == 0);
+    if (mag_ok) {
+        mag_ok = (lis3mdl_configure(&s_mag) == 0);
     }
     if (mag_ok) {
-        ESP_LOGI(TAG, "Mag (LIS3MDL) initialized");
+        ESP_LOGI(TAG, "Mag (LIS3MDL) initialized via SPI");
     } else {
-        ESP_LOGE(TAG, "Mag init/configure FAILED after %d attempts", SENSOR_INIT_MAX_ATTEMPTS);
+        ESP_LOGE(TAG, "Mag init/configure FAILED");
     }
 
-    /* MPRLS not physically connected */
-    bool mprls_ok = false;
+    bool mprls_ok = false;  /* MPRLS not connected */
 
-    /* Signal camera that I2C sensor init is complete — safe to use SCCB now */
-    ESP_LOGI(TAG, "I2C sensor init complete, releasing bus for camera SCCB");
+    /* Signal camera that sensor init is complete — safe to use I2C/SCCB now */
+    ESP_LOGI(TAG, "Sensor init complete, releasing I2C for camera SCCB");
     i2c_sync_sensors_done();
 
     /* GPS init (starts its own internal UART parser task) */
@@ -207,11 +172,6 @@ static void sensor_task(void *param)
     /* RC_CHANNELS: populated by SBUS receiver or RPC RC override from GCS */
     orb_advertise(ORB_ID_RC_CHANNELS, sizeof(rc_channels_t));
     orb_advertise(ORB_ID_AIRSPEED, sizeof(airspeed_t));
-
-    /* Suppress I2C driver error logs during main loop —
-     * NACK errors are expected when sensors are absent/failing
-     * and will flood the console and trigger watchdog at 1kHz. */
-    esp_log_level_set("i2c.master", ESP_LOG_NONE);
 
     /* ---- Main loop at 1 kHz ---- */
     TickType_t last_wake = xTaskGetTickCount();

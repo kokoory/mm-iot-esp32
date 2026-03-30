@@ -1,8 +1,9 @@
 /*
- * ISM330DHC 6-axis IMU I2C Driver
+ * ISM330DHC/ISM330DHCX 6-axis IMU SPI Driver
  *
- * Full implementation with burst reads, proper scaling,
- * and high-performance configuration for flight control.
+ * SPI mode 3 (CPOL=1, CPHA=1), max 10 MHz.
+ * Read: bit7 of address byte = 1
+ * Write: bit7 of address byte = 0
  */
 
 #include "ism330dhc.h"
@@ -26,43 +27,71 @@ static const char *TAG = "ism330dhc";
 #define TEMP_OFFSET         25.0f
 
 /* ------------------------------------------------------------------ */
-/* Low-level I2C helpers                                               */
+/* Low-level SPI helpers                                               */
 /* ------------------------------------------------------------------ */
 
 static esp_err_t ism330dhc_write_reg(ism330dhc_t *dev, uint8_t reg, uint8_t val)
 {
-    uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(dev->i2c_dev, buf, 2, 100);
+    uint8_t tx[2] = { reg & 0x7F, val };  /* bit7 = 0 for write */
+    spi_transaction_t t = {
+        .length = 16,
+        .tx_buffer = tx,
+    };
+    return spi_device_transmit(dev->spi_dev, &t);
 }
 
 static esp_err_t ism330dhc_read_reg(ism330dhc_t *dev, uint8_t reg, uint8_t *val)
 {
-    return i2c_master_transmit_receive(dev->i2c_dev, &reg, 1, val, 1, 100);
+    uint8_t tx[2] = { reg | 0x80, 0x00 };  /* bit7 = 1 for read */
+    uint8_t rx[2] = { 0 };
+    spi_transaction_t t = {
+        .length = 16,
+        .tx_buffer = tx,
+        .rx_buffer = rx,
+    };
+    esp_err_t ret = spi_device_transmit(dev->spi_dev, &t);
+    if (ret == ESP_OK) *val = rx[1];
+    return ret;
 }
 
 static esp_err_t ism330dhc_read_burst(ism330dhc_t *dev, uint8_t start_reg,
                                        uint8_t *buf, size_t len)
 {
-    return i2c_master_transmit_receive(dev->i2c_dev, &start_reg, 1, buf, len, 100);
+    uint8_t tx[1 + 14];  /* max burst = 14 bytes */
+    uint8_t rx[1 + 14];
+    if (len > 14) return ESP_ERR_INVALID_SIZE;
+
+    memset(tx, 0, sizeof(tx));
+    tx[0] = start_reg | 0x80;  /* bit7 = 1 for read */
+
+    spi_transaction_t t = {
+        .length = (1 + len) * 8,
+        .tx_buffer = tx,
+        .rx_buffer = rx,
+    };
+    esp_err_t ret = spi_device_transmit(dev->spi_dev, &t);
+    if (ret == ESP_OK) {
+        memcpy(buf, &rx[1], len);
+    }
+    return ret;
 }
 
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
-int ism330dhc_init(ism330dhc_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_addr)
+int ism330dhc_init(ism330dhc_t *dev, spi_host_device_t host, int cs_pin)
 {
-    dev->i2c_addr = i2c_addr;
-
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = i2c_addr,
-        .scl_speed_hz = 100000,
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 8 * 1000 * 1000,  /* 8 MHz */
+        .mode = 3,                            /* SPI mode 3: CPOL=1, CPHA=1 */
+        .spics_io_num = cs_pin,
+        .queue_size = 1,
     };
 
-    esp_err_t ret = i2c_master_bus_add_device(bus, &dev_cfg, &dev->i2c_dev);
+    esp_err_t ret = spi_bus_add_device(host, &devcfg, &dev->spi_dev);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2C add device failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "SPI add device failed: %s", esp_err_to_name(ret));
         return -1;
     }
 
@@ -71,7 +100,7 @@ int ism330dhc_init(ism330dhc_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_ad
 
     /* Software reset via CTRL3_C */
     ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL3_C, 0x01);
-    vTaskDelay(pdMS_TO_TICKS(50));  /* longer wait after reset */
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     /* Probe WHO_AM_I */
     uint8_t who = 0;
@@ -82,50 +111,36 @@ int ism330dhc_init(ism330dhc_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_ad
         return -1;
     }
 
-    ESP_LOGI(TAG, "ISM330DHC detected (WHO_AM_I=0x%02X) at I2C addr 0x%02X",
-             who, i2c_addr);
+    ESP_LOGI(TAG, "ISM330DHC detected (WHO_AM_I=0x%02X) via SPI (CS=%d)",
+             who, cs_pin);
     return 0;
-}
-
-/* Write register with retry (weak pull-ups cause occasional NACK) */
-static esp_err_t ism330dhc_write_reg_retry(ism330dhc_t *dev, uint8_t reg, uint8_t val)
-{
-    for (int attempt = 0; attempt < 3; attempt++) {
-        esp_err_t ret = ism330dhc_write_reg(dev, reg, val);
-        if (ret == ESP_OK) return ESP_OK;
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-    ESP_LOGE(TAG, "write reg 0x%02X failed after 3 retries", reg);
-    return ESP_FAIL;
 }
 
 int ism330dhc_configure(ism330dhc_t *dev)
 {
-    esp_err_t ret;
-
-    /* CTRL3_C: IF_INC=1, BDU=1 */
-    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL3_C, 0x44);
-    if (ret != ESP_OK) return -1;
+    /* CTRL3_C: IF_INC=1, BDU=1, SPI 4-wire mode (SIM=0) */
+    esp_err_t ret = ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL3_C, 0x44);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "configure CTRL3_C failed"); return -1; }
 
     /* CTRL1_XL: ODR=1.66kHz, FS=±16g */
-    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL1_XL, 0x84);
-    if (ret != ESP_OK) return -1;
+    ret = ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL1_XL, 0x84);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "configure CTRL1_XL failed"); return -1; }
 
     /* CTRL2_G: ODR=1.66kHz, FS=±2000dps */
-    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL2_G, 0x8C);
-    if (ret != ESP_OK) return -1;
+    ret = ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL2_G, 0x8C);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "configure CTRL2_G failed"); return -1; }
 
-    /* CTRL4_C: enable gyro LPF1 */
-    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL4_C, 0x04);
-    if (ret != ESP_OK) return -1;
+    /* CTRL4_C: enable gyro LPF1, I2C disable (SPI only) */
+    ret = ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL4_C, 0x06);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "configure CTRL4_C failed"); return -1; }
 
     /* CTRL6_C: gyro LPF1 widest BW */
-    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL6_C, 0x00);
-    if (ret != ESP_OK) return -1;
+    ret = ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL6_C, 0x00);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "configure CTRL6_C failed"); return -1; }
 
     /* CTRL8_XL: accel filter defaults */
-    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL8_XL, 0x00);
-    if (ret != ESP_OK) return -1;
+    ret = ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL8_XL, 0x00);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "configure CTRL8_XL failed"); return -1; }
 
     vTaskDelay(pdMS_TO_TICKS(10));
 
