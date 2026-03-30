@@ -24,7 +24,7 @@
 #define PIN_I2C_SDA         7
 #define PIN_I2C_SCL         8
 #define I2C_PORT            I2C_NUM_0
-#define I2C_FREQ_HZ         400000
+#define I2C_FREQ_HZ         100000    /* 100kHz — internal pull-ups too weak for 400kHz */
 
 /* ── GPS (NMEA UART) ─────────────────────────────────────────── */
 #define PIN_GPS_TX          33

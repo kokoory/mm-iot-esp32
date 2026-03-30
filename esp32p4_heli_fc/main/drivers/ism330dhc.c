@@ -57,7 +57,7 @@ int ism330dhc_init(ism330dhc_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_ad
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = i2c_addr,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = 100000,
     };
 
     esp_err_t ret = i2c_master_bus_add_device(bus, &dev_cfg, &dev->i2c_dev);
@@ -67,11 +67,11 @@ int ism330dhc_init(ism330dhc_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_ad
     }
 
     /* Allow device startup time */
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(20));
 
     /* Software reset via CTRL3_C */
     ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL3_C, 0x01);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(50));  /* longer wait after reset */
 
     /* Probe WHO_AM_I */
     uint8_t who = 0;
@@ -87,54 +87,47 @@ int ism330dhc_init(ism330dhc_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_ad
     return 0;
 }
 
+/* Write register with retry (weak pull-ups cause occasional NACK) */
+static esp_err_t ism330dhc_write_reg_retry(ism330dhc_t *dev, uint8_t reg, uint8_t val)
+{
+    for (int attempt = 0; attempt < 3; attempt++) {
+        esp_err_t ret = ism330dhc_write_reg(dev, reg, val);
+        if (ret == ESP_OK) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    ESP_LOGE(TAG, "write reg 0x%02X failed after 3 retries", reg);
+    return ESP_FAIL;
+}
+
 int ism330dhc_configure(ism330dhc_t *dev)
 {
-    /*
-     * CTRL3_C (0x12):
-     *   [2] IF_INC = 1 (auto-increment address for burst read)
-     *   [6] BDU    = 1 (block data update)
-     *   => 0x44
-     */
-    ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL3_C, 0x44);
+    esp_err_t ret;
 
-    /*
-     * CTRL1_XL (0x10): Accelerometer config
-     *   [7:4] ODR_XL = 1000 -> 1.66 kHz
-     *   [3:2] FS_XL  = 01   -> ±16g
-     *   => 0x84
-     */
-    ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL1_XL, 0x84);
+    /* CTRL3_C: IF_INC=1, BDU=1 */
+    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL3_C, 0x44);
+    if (ret != ESP_OK) return -1;
 
-    /*
-     * CTRL2_G (0x11): Gyroscope config
-     *   [7:4] ODR_G  = 1000 -> 1.66 kHz
-     *   [3:2] FS_G   = 11   -> ±2000 dps
-     *   => 0x8C
-     */
-    ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL2_G, 0x8C);
+    /* CTRL1_XL: ODR=1.66kHz, FS=±16g */
+    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL1_XL, 0x84);
+    if (ret != ESP_OK) return -1;
 
-    /*
-     * CTRL4_C (0x13):
-     *   [2] LPF1_SEL_G = 1 (enable gyro LPF1)
-     *   [1] I2C_disable = 0 (keep I2C enabled)
-     *   => 0x04
-     */
-    ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL4_C, 0x04);
+    /* CTRL2_G: ODR=1.66kHz, FS=±2000dps */
+    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL2_G, 0x8C);
+    if (ret != ESP_OK) return -1;
 
-    /*
-     * CTRL6_C (0x15): Gyro LPF1 bandwidth
-     *   [2:0] FTYPE = 000 -> widest BW for given ODR
-     *   => 0x00
-     */
-    ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL6_C, 0x00);
+    /* CTRL4_C: enable gyro LPF1 */
+    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL4_C, 0x04);
+    if (ret != ESP_OK) return -1;
 
-    /*
-     * CTRL8_XL (0x17): Accelerometer filter config
-     *   => 0x00 (defaults)
-     */
-    ism330dhc_write_reg(dev, ISM330DHC_REG_CTRL8_XL, 0x00);
+    /* CTRL6_C: gyro LPF1 widest BW */
+    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL6_C, 0x00);
+    if (ret != ESP_OK) return -1;
 
-    vTaskDelay(pdMS_TO_TICKS(5));
+    /* CTRL8_XL: accel filter defaults */
+    ret = ism330dhc_write_reg_retry(dev, ISM330DHC_REG_CTRL8_XL, 0x00);
+    if (ret != ESP_OK) return -1;
+
+    vTaskDelay(pdMS_TO_TICKS(10));
 
     ESP_LOGI(TAG, "configured: accel +/-16g, gyro +/-2000dps, ODR 1.66kHz");
     return 0;
