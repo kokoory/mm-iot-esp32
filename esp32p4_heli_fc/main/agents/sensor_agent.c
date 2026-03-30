@@ -189,6 +189,11 @@ static void sensor_task(void *param)
     orb_advertise(ORB_ID_RC_CHANNELS, sizeof(rc_channels_t));
     orb_advertise(ORB_ID_AIRSPEED, sizeof(airspeed_t));
 
+    /* Suppress I2C driver error logs during main loop —
+     * NACK errors are expected when sensors are absent/failing
+     * and will flood the console and trigger watchdog at 1kHz. */
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
+
     /* ---- Main loop at 1 kHz ---- */
     TickType_t last_wake = xTaskGetTickCount();
     uint32_t cycle = 0;
@@ -196,9 +201,12 @@ static void sensor_task(void *param)
 
     /* Sensor health counters for diagnostics */
     uint32_t imu_read_errors = 0;
+    uint32_t imu_consecutive_errors = 0;
     uint32_t imu_spike_rejects = 0;
     uint32_t baro_read_errors = 0;
     uint32_t baro_outlier_rejects = 0;
+
+    #define SENSOR_MAX_CONSECUTIVE_ERRORS 50  /* disable sensor after 50 consecutive fails */
 
     while (1) {
         uint64_t now_us = (uint64_t)esp_timer_get_time();
@@ -212,6 +220,7 @@ static void sensor_task(void *param)
             float accel[3], gyro[3], temp;
 
             if (ism330dhc_read(&s_imu, accel, gyro, &temp) == 0) {
+                imu_consecutive_errors = 0; /* reset on success */
                 /* --- Spike rejection: reject readings outside physical limits --- */
                 float accel_mag = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
                 float gyro_mag = sqrtf(gyro[0]*gyro[0] + gyro[1]*gyro[1] + gyro[2]*gyro[2]);
@@ -285,6 +294,14 @@ static void sensor_task(void *param)
                 alt_estimator_update_accel(&s_alt_est, accel_z_up, dt);
             } else {
                 imu_read_errors++;
+                imu_consecutive_errors++;
+                if (imu_consecutive_errors == SENSOR_MAX_CONSECUTIVE_ERRORS) {
+                    ESP_LOGE(TAG, "IMU: %lu consecutive read failures, disabling",
+                             (unsigned long)imu_consecutive_errors);
+                    imu_ok = false;
+                } else if (imu_consecutive_errors == 1 || (imu_consecutive_errors % 100) == 0) {
+                    ESP_LOGW(TAG, "IMU read error (total=%lu)", (unsigned long)imu_read_errors);
+                }
             }
         }
 imu_done:

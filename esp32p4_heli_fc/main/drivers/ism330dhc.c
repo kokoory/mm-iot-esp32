@@ -145,7 +145,6 @@ int ism330dhc_read(ism330dhc_t *dev, float accel[3], float gyro[3], float *temp)
     uint8_t buf[14];
     esp_err_t ret = ism330dhc_read_burst(dev, ISM330DHC_REG_OUT_TEMP_L, buf, 14);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "burst read failed: %s", esp_err_to_name(ret));
         return -1;
     }
 
