@@ -111,6 +111,16 @@ static void sensor_task(void *param)
         return;
     }
 
+    /* ---- Pre-assert all CS pins HIGH before any sensor init ---- */
+    gpio_config_t cs_cfg = {
+        .pin_bit_mask = (1ULL << PIN_SENSOR_CS_IMU) | (1ULL << PIN_SENSOR_CS_MAG),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+    };
+    gpio_config(&cs_cfg);
+    gpio_set_level(PIN_SENSOR_CS_IMU, 1);
+    gpio_set_level(PIN_SENSOR_CS_MAG, 1);
+
     /* ---- Initialize sensors via SPI ---- */
     bool imu_ok = (ism330dhc_init(&s_imu, SENSOR_SPI_HOST, PIN_SENSOR_CS_IMU) == 0);
     if (imu_ok) {
