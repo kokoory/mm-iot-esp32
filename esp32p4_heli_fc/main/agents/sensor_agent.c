@@ -149,13 +149,8 @@ static void sensor_task(void *param)
         ESP_LOGE(TAG, "Mag init/configure FAILED");
     }
 
-    /* MPRLS differential pressure sensor (pitot tube airspeed) */
-    bool mprls_ok = (mprls_init(&s_mprls, i2c_bus, MPRLS_I2C_ADDR) == 0);
-    if (mprls_ok) {
-        ESP_LOGI(TAG, "MPRLS pressure sensor initialized");
-    } else {
-        ESP_LOGW(TAG, "MPRLS init FAILED (airspeed unavailable)");
-    }
+    /* MPRLS not physically connected */
+    bool mprls_ok = false;
 
     /* Signal camera that I2C sensor init is complete — safe to use SCCB now */
     ESP_LOGI(TAG, "I2C sensor init complete, releasing bus for camera SCCB");
