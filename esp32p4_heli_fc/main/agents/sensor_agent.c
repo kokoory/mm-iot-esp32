@@ -124,15 +124,9 @@ static void sensor_task(void *param)
         ESP_LOGE(TAG, "IMU init/configure FAILED");
     }
 
-    bool baro_ok = (bmp390_init(&s_baro, i2c_bus, BMP390_I2C_ADDR) == 0);
-    if (baro_ok) {
-        baro_ok = (bmp390_configure(&s_baro) == 0);
-    }
-    if (baro_ok) {
-        ESP_LOGI(TAG, "Baro (BMP390) initialized");
-    } else {
-        ESP_LOGE(TAG, "Baro init/configure FAILED");
-    }
+    /* BMP390 disabled — suspected I2C bus interference (all sensors read 0x77) */
+    bool baro_ok = false;
+    ESP_LOGW(TAG, "Baro (BMP390) DISABLED for I2C bus debugging");
 
     bool mag_ok = (lis3mdl_init(&s_mag, i2c_bus, LIS3MDL_I2C_ADDR) == 0);
     if (mag_ok) {
@@ -144,13 +138,9 @@ static void sensor_task(void *param)
         ESP_LOGE(TAG, "Mag init/configure FAILED");
     }
 
-    /* MPRLS differential pressure sensor (pitot tube airspeed) */
-    bool mprls_ok = (mprls_init(&s_mprls, i2c_bus, MPRLS_I2C_ADDR) == 0);
-    if (mprls_ok) {
-        ESP_LOGI(TAG, "MPRLS pressure sensor initialized");
-    } else {
-        ESP_LOGW(TAG, "MPRLS init FAILED (airspeed unavailable)");
-    }
+    /* MPRLS disabled — suspected I2C bus interference */
+    bool mprls_ok = false;
+    ESP_LOGW(TAG, "MPRLS DISABLED for I2C bus debugging");
 
     /* Signal camera that I2C sensor init is complete — safe to use SCCB now */
     ESP_LOGI(TAG, "I2C sensor init complete, releasing bus for camera SCCB");
