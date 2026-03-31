@@ -1,7 +1,8 @@
 /*
- * Thermal Camera — FLIR Lepton 3.5 via PureThermal USB UVC
+ * Thermal Camera — FLIR Lepton via PureThermal USB UVC
  *
- * USB Host UVC driver receives 160x120 Y16 frames at ~9fps.
+ * USB Host UVC driver receives Y16 frames at ~9fps.
+ * Resolution is auto-negotiated (80x60 or 160x120).
  * Frames are double-buffered in PSRAM for thread-safe access.
  */
 
@@ -17,6 +18,11 @@
 #include "usb/uvc_host.h"
 
 static const char *TAG = "thermal_cam";
+
+/* Negotiated resolution (set after stream open) */
+static unsigned s_width = 0;
+static unsigned s_height = 0;
+static size_t s_frame_size = 0;
 
 /* Double buffer in PSRAM */
 static uint16_t *s_frame_buf = NULL;
@@ -55,16 +61,12 @@ static void usb_host_lib_task(void *param)
 
 static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
 {
-    if (!frame || !frame->data) return true;
-
-    /* Validate frame size */
-    if (frame->data_len < THERMAL_FRAME_SIZE) {
-        return true;  /* Incomplete frame, skip */
-    }
+    if (!frame || !frame->data || !s_frame_size) return true;
 
     /* Copy to double buffer under mutex */
     if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-        memcpy(s_frame_buf, frame->data, THERMAL_FRAME_SIZE);
+        size_t copy_len = (frame->data_len < s_frame_size) ? frame->data_len : s_frame_size;
+        memcpy(s_frame_buf, frame->data, copy_len);
         s_frame_valid = true;
         xSemaphoreGive(s_frame_mutex);
     }
@@ -108,24 +110,11 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     s_user_cb = frame_cb;
     s_user_ctx = user_ctx;
 
-    /* Allocate frame buffer in PSRAM */
-    s_frame_buf = heap_caps_calloc(1, THERMAL_FRAME_SIZE, MALLOC_CAP_SPIRAM);
-    if (!s_frame_buf) {
-        ESP_LOGE(TAG, "Failed to allocate frame buffer");
-        return ESP_ERR_NO_MEM;
-    }
-
     s_frame_mutex = xSemaphoreCreateMutex();
     if (!s_frame_mutex) {
         ESP_LOGE(TAG, "Failed to create mutex");
         return ESP_ERR_NO_MEM;
     }
-
-    /* Enable USB debug logs for enumeration troubleshooting */
-    esp_log_level_set("ENUM", ESP_LOG_DEBUG);
-    esp_log_level_set("USB_HOST", ESP_LOG_DEBUG);
-    esp_log_level_set("UVC", ESP_LOG_DEBUG);
-    esp_log_level_set("uvc-host", ESP_LOG_DEBUG);
 
     /* Install USB Host Library */
     usb_host_config_t host_config = {
@@ -153,9 +142,11 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         return ret;
     }
 
-    /* Open UVC stream — PureThermal Lepton 3.5
-     * Use DEFAULT format to auto-negotiate; PureThermal may advertise
-     * Y16 which doesn't map to YUY2/MJPEG enum values. */
+    /* Open UVC stream — PureThermal Lepton
+     * Use DEFAULT format to auto-negotiate; PureThermal advertises Y16
+     * which doesn't map to standard YUY2/MJPEG enum values.
+     * Pre-allocate frame buffers for max possible size (160x120 Y16). */
+    const size_t max_frame_size = 160 * 120 * 2;
     uvc_host_stream_config_t stream_config = {
         .event_cb = uvc_stream_callback,
         .frame_cb = uvc_frame_callback,
@@ -172,7 +163,7 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         },
         .advanced = {
             .number_of_frame_buffers = 3,
-            .frame_size = THERMAL_FRAME_SIZE,
+            .frame_size = max_frame_size,
             .frame_heap_caps = MALLOC_CAP_SPIRAM,
             .number_of_urbs = 3,
             .urb_size = 10 * 1024,
@@ -187,19 +178,31 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         return ret;
     }
 
-    /* Log negotiated format */
+    /* Read negotiated format and set frame dimensions */
     uvc_host_stream_format_t negotiated = {0};
     if (uvc_host_stream_format_get(s_stream, &negotiated) == ESP_OK) {
-        ESP_LOGI(TAG, "Negotiated format: %ux%u @ %.1f fps, format=%d",
-                 negotiated.h_res, negotiated.v_res,
-                 negotiated.fps, negotiated.format);
+        s_width = negotiated.h_res;
+        s_height = negotiated.v_res;
+        s_frame_size = s_width * s_height * 2;  /* Y16 = 2 bytes/pixel */
+        ESP_LOGI(TAG, "Negotiated: %ux%u @ %.1f fps (format=%d, frame=%u bytes)",
+                 s_width, s_height, negotiated.fps, negotiated.format, (unsigned)s_frame_size);
+    } else {
+        /* Fallback */
+        s_width = 80;
+        s_height = 60;
+        s_frame_size = 80 * 60 * 2;
+        ESP_LOGW(TAG, "Could not read format, assuming 80x60");
     }
 
-    /* Print full UVC descriptor info */
-    uvc_host_desc_print(s_stream);
+    /* Allocate frame buffer in PSRAM to match actual resolution */
+    s_frame_buf = heap_caps_calloc(1, s_frame_size, MALLOC_CAP_SPIRAM);
+    if (!s_frame_buf) {
+        ESP_LOGE(TAG, "Failed to allocate frame buffer (%u bytes)", (unsigned)s_frame_size);
+        return ESP_ERR_NO_MEM;
+    }
 
     s_active = true;
-    ESP_LOGI(TAG, "PureThermal Lepton 3.5 connected");
+    ESP_LOGI(TAG, "PureThermal Lepton connected (%ux%u)", s_width, s_height);
     return ESP_OK;
 }
 
@@ -227,7 +230,7 @@ bool thermal_camera_get_frame(uint16_t *buf)
 
     if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (s_frame_valid) {
-            memcpy(buf, s_frame_buf, THERMAL_FRAME_SIZE);
+            memcpy(buf, s_frame_buf, s_frame_size);
             xSemaphoreGive(s_frame_mutex);
             return true;
         }
@@ -239,4 +242,19 @@ bool thermal_camera_get_frame(uint16_t *buf)
 bool thermal_camera_is_active(void)
 {
     return s_active;
+}
+
+unsigned thermal_camera_width(void)
+{
+    return s_width;
+}
+
+unsigned thermal_camera_height(void)
+{
+    return s_height;
+}
+
+size_t thermal_camera_frame_size(void)
+{
+    return s_frame_size;
 }
