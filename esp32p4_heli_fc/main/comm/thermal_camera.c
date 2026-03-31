@@ -153,7 +153,9 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         return ret;
     }
 
-    /* Open UVC stream — PureThermal Lepton 3.5 */
+    /* Open UVC stream — PureThermal Lepton 3.5
+     * Use DEFAULT format to auto-negotiate; PureThermal may advertise
+     * Y16 which doesn't map to YUY2/MJPEG enum values. */
     uvc_host_stream_config_t stream_config = {
         .event_cb = uvc_stream_callback,
         .frame_cb = uvc_frame_callback,
@@ -163,10 +165,10 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
             .pid = 0x0100,  /* PureThermal PID */
         },
         .vs_format = {
-            .h_res = THERMAL_WIDTH,
-            .v_res = THERMAL_HEIGHT,
-            .fps = THERMAL_FPS,
-            .format = UVC_VS_FORMAT_YUY2,
+            .h_res = 0,     /* 0 = accept any resolution */
+            .v_res = 0,
+            .fps = 0,       /* 0 = accept any frame rate */
+            .format = UVC_VS_FORMAT_DEFAULT,
         },
         .advanced = {
             .number_of_frame_buffers = 3,
@@ -185,8 +187,19 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         return ret;
     }
 
+    /* Log negotiated format */
+    uvc_host_stream_format_t negotiated = {0};
+    if (uvc_host_stream_format_get(s_stream, &negotiated) == ESP_OK) {
+        ESP_LOGI(TAG, "Negotiated format: %ux%u @ %.1f fps, format=%d",
+                 negotiated.h_res, negotiated.v_res,
+                 negotiated.fps, negotiated.format);
+    }
+
+    /* Print full UVC descriptor info */
+    uvc_host_desc_print(s_stream);
+
     s_active = true;
-    ESP_LOGI(TAG, "PureThermal Lepton 3.5 connected (160x120 @ 9fps Y16)");
+    ESP_LOGI(TAG, "PureThermal Lepton 3.5 connected");
     return ESP_OK;
 }
 
