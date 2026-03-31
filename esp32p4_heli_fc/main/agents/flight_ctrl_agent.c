@@ -69,6 +69,9 @@ static const char *TAG = "flight_ctrl";
 #define MISSION_WP_RADIUS   3.0f    /* waypoint acceptance radius (meters) */
 #define MISSION_CLIMB_RATE  2.0f    /* m/s climb/descent to waypoint altitude */
 
+/* Collective rate limiter: max change per second (prevents pitch inversion) */
+#define COLL_RATE_LIMIT     1.0f    /* normalized units/sec (full range in 2s) */
+
 /* ── Helper: apply deadzone to RC stick ──────────────────────── */
 
 static float apply_deadzone(float input, float dz)
@@ -181,6 +184,9 @@ static void flight_ctrl_task(void *param)
     uint32_t land_low_alt_start_ms = 0;
     bool land_detected = false;
 
+    /* Collective rate limiter state */
+    float prev_collective = -1.0f;  /* start at minimum */
+
     /* RTH state machine */
     enum { RTH_CLIMB, RTH_TRANSIT, RTH_DESCEND, RTH_LAND } rth_phase = RTH_CLIMB;
 
@@ -245,6 +251,15 @@ static void flight_ctrl_task(void *param)
         float rc_pitch = apply_deadzone(rc.channels[1], dz);
         float rc_coll  = rc.channels[2] * 2.0f - 1.0f;
         float rc_yaw   = apply_deadzone(rc.channels[3], dz);
+
+        /* ---- Collective rate limiter: prevent sudden pitch changes ---- */
+        {
+            float max_delta = COLL_RATE_LIMIT * ctrl_dt;
+            float delta = rc_coll - prev_collective;
+            if (delta > max_delta) rc_coll = prev_collective + max_delta;
+            else if (delta < -max_delta) rc_coll = prev_collective - max_delta;
+            prev_collective = rc_coll;
+        }
 
         /* ---- Airspeed limiting: reduce forward pitch when overspeed ---- */
         float airspeed_pitch_limit = 1.0f;  /* 1.0 = no limit */
@@ -500,6 +515,7 @@ static void flight_ctrl_task(void *param)
                 land_low_alt_start_ms = 0;
             }
 
+            act.land_detected = land_detected;
             if (!land_detected) {
                 act.collective = constrain_f(collective_out, -1.0f, 1.0f);
                 act.throttle = constrain_f((collective_out + 1.0f) * 0.5f, 0.0f, 1.0f);

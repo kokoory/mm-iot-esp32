@@ -42,6 +42,7 @@
 #include "../common/param.h"
 #include "../uorb/topics/vehicle_attitude.h"
 #include "../uorb/topics/vehicle_local_position.h"
+#include "../uorb/topics/actuator_controls.h"
 #include "mission_mgr.h"
 
 static const char *TAG = "sysmon_agent";
@@ -202,6 +203,7 @@ static void sysmon_task(void *param)
     /* Subscribe to topics for RPC telemetry forwarding */
     orb_subscription_t *att_sub    = orb_subscribe(ORB_ID_VEHICLE_ATTITUDE);
     orb_subscription_t *lpos_sub   = orb_subscribe(ORB_ID_VEHICLE_LOCAL_POSITION);
+    orb_subscription_t *act_sub    = orb_subscribe(ORB_ID_ACTUATOR_CONTROLS);
 
     /* State */
     arm_state_t     arm_state     = ARM_STATE_DISARMED;
@@ -235,6 +237,10 @@ static void sysmon_task(void *param)
     /* Mission current periodic send timer */
     uint32_t last_mission_current_ms = 0;
     #define MISSION_CURRENT_INTERVAL_MS 1000 /* send every 1 s in mission mode */
+
+    /* Auto-disarm on landing: confirm land_detected for 3 seconds before disarm */
+    uint32_t land_detected_start_ms = 0;
+    #define LAND_DISARM_CONFIRM_MS 3000 /* 3 second confirmation */
 
     /* LED state */
     uint32_t led_counter = 0;
@@ -415,9 +421,16 @@ static void sysmon_task(void *param)
                 break;
 
             case FAILSAFE_SENSOR_FAILURE:
-                /* IMU failure: immediate disarm (no reliable control possible) */
-                ESP_LOGE(TAG, "FAILSAFE SENSOR_FAILURE: IMU lost, disarming!");
-                arm_state = ARM_STATE_DISARMED;
+                /* IMU failure: switch to LAND mode for controlled descent.
+                 * Immediate disarm at altitude is more dangerous than attempting
+                 * a descent with last known attitude. The actuator watchdog (100ms)
+                 * provides a secondary safety net if control loops also fail. */
+                if (flight_mode != FLIGHT_MODE_LAND) {
+                    ESP_LOGE(TAG, "FAILSAFE SENSOR_FAILURE: IMU lost, forcing LAND!");
+                    flight_mode = FLIGHT_MODE_LAND;
+                    send_statustext_rpc(rpc, MAV_SEVERITY_EMERGENCY,
+                                        "Sensor failure - emergency landing");
+                }
                 break;
 
             case FAILSAFE_GCS_LOST:
@@ -460,7 +473,30 @@ static void sysmon_task(void *param)
         prev_baro_ok = baro_ok;
         prev_mag_ok  = mag_ok;
 
-        /* ---- 4c. RC arm switch (CH5) and mode switch (CH4) ---- */
+        /* ---- 4c. Auto-disarm on landing ---- */
+        if (arm_state == ARM_STATE_ARMED) {
+            actuator_controls_t act_msg = {0};
+            orb_copy(act_sub, &act_msg);
+            if (act_msg.land_detected) {
+                if (land_detected_start_ms == 0) {
+                    land_detected_start_ms = now_ms;
+                }
+                if ((now_ms - land_detected_start_ms) > LAND_DISARM_CONFIRM_MS) {
+                    ESP_LOGI(TAG, "AUTO-DISARM: land_detected confirmed for %dms",
+                             LAND_DISARM_CONFIRM_MS);
+                    arm_state = ARM_STATE_DISARMED;
+                    send_statustext_rpc(rpc, MAV_SEVERITY_INFO,
+                                        "Vehicle disarmed (landing)");
+                    land_detected_start_ms = 0;
+                }
+            } else {
+                land_detected_start_ms = 0;
+            }
+        } else {
+            land_detected_start_ms = 0;
+        }
+
+        /* ---- 4d. RC arm switch (CH5) and mode switch (CH4) ---- */
         if (rc_ok && last_rc.channel_count >= 6) {
             /* --- Arm switch: CH5 rising edge above threshold --- */
             float arm_ch = last_rc.channels[5];
