@@ -32,6 +32,7 @@
 #include "esp_netif.h"
 
 #include "camera_h264.h"
+#include "thermal_camera.h"
 #include "../common/i2c_sync.h"
 
 static const char *TAG = "camera_h264";
@@ -898,6 +899,149 @@ static esp_err_t status_handler(httpd_req_t *req)
     return httpd_resp_send(req, buf, strlen(buf));
 }
 
+/* ========== Thermal Camera MJPEG Stream ========== */
+
+/*
+ * Minimal BMP builder for grayscale image (8-bit, 256-entry palette).
+ * BMP is simple, no compression library needed, and browsers render it natively.
+ * For 80x60 the BMP is only ~5.8KB — fine for 9fps over HaLow.
+ */
+static size_t thermal_build_bmp(const uint16_t *y16, unsigned w, unsigned h, uint8_t *out, size_t out_size)
+{
+    /* BMP file header (14) + DIB header (40) + palette (256*4) + pixel data */
+    const size_t palette_size = 256 * 4;
+    const size_t row_bytes = (w + 3) & ~3;  /* rows padded to 4-byte boundary */
+    const size_t pixel_data_size = row_bytes * h;
+    const size_t header_size = 14 + 40 + palette_size;
+    const size_t file_size = header_size + pixel_data_size;
+
+    if (file_size > out_size) return 0;
+
+    memset(out, 0, header_size);
+
+    /* Find min/max for auto-ranging */
+    uint16_t vmin = 0xFFFF, vmax = 0;
+    size_t npix = w * h;
+    for (size_t i = 0; i < npix; i++) {
+        if (y16[i] < vmin) vmin = y16[i];
+        if (y16[i] > vmax) vmax = y16[i];
+    }
+    uint16_t range = (vmax > vmin) ? (vmax - vmin) : 1;
+
+    /* BMP file header */
+    out[0] = 'B'; out[1] = 'M';
+    out[2] = file_size & 0xFF; out[3] = (file_size >> 8) & 0xFF;
+    out[4] = (file_size >> 16) & 0xFF; out[5] = (file_size >> 24) & 0xFF;
+    out[10] = header_size & 0xFF; out[11] = (header_size >> 8) & 0xFF;
+
+    /* DIB header (BITMAPINFOHEADER) */
+    out[14] = 40;  /* header size */
+    out[18] = w & 0xFF; out[19] = (w >> 8) & 0xFF;
+    out[22] = h & 0xFF; out[23] = (h >> 8) & 0xFF;
+    out[26] = 1;   /* color planes */
+    out[28] = 8;   /* bits per pixel */
+    /* compression = 0 (BI_RGB), already zeroed */
+
+    /* Grayscale palette (iron colormap for thermal: black → blue → red → yellow → white) */
+    uint8_t *pal = out + 14 + 40;
+    for (int i = 0; i < 256; i++) {
+        uint8_t r, g, b;
+        if (i < 64) {
+            /* Black to blue */
+            r = 0; g = 0; b = i * 4;
+        } else if (i < 128) {
+            /* Blue to red */
+            uint8_t t = (i - 64) * 4;
+            r = t; g = 0; b = 255 - t;
+        } else if (i < 192) {
+            /* Red to yellow */
+            uint8_t t = (i - 128) * 4;
+            r = 255; g = t; b = 0;
+        } else {
+            /* Yellow to white */
+            uint8_t t = (i - 192) * 4;
+            r = 255; g = 255; b = t;
+        }
+        pal[i * 4 + 0] = b;  /* BMP is BGR */
+        pal[i * 4 + 1] = g;
+        pal[i * 4 + 2] = r;
+        pal[i * 4 + 3] = 0;
+    }
+
+    /* Pixel data — BMP stores bottom-to-top */
+    uint8_t *pixels = out + header_size;
+    for (unsigned row = 0; row < h; row++) {
+        unsigned src_row = (h - 1 - row);  /* flip vertically */
+        const uint16_t *src = y16 + src_row * w;
+        uint8_t *dst = pixels + row * row_bytes;
+        for (unsigned col = 0; col < w; col++) {
+            dst[col] = (uint8_t)(((uint32_t)(src[col] - vmin) * 255) / range);
+        }
+    }
+
+    return file_size;
+}
+
+static esp_err_t thermal_stream_handler(httpd_req_t *req)
+{
+    if (!thermal_camera_is_active()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Thermal camera not connected");
+        return ESP_FAIL;
+    }
+
+    unsigned tw = thermal_camera_width();
+    unsigned th = thermal_camera_height();
+    size_t frame_sz = thermal_camera_frame_size();
+
+    /* Allocate buffers for Y16 frame + BMP output */
+    uint16_t *y16_buf = heap_caps_malloc(frame_sz, MALLOC_CAP_SPIRAM);
+    /* BMP: header(14) + DIB(40) + palette(1024) + pixels(padded) */
+    size_t bmp_max = 14 + 40 + 1024 + ((tw + 3) & ~3) * th + 64;
+    uint8_t *bmp_buf = heap_caps_malloc(bmp_max, MALLOC_CAP_SPIRAM);
+
+    if (!y16_buf || !bmp_buf) {
+        free(y16_buf);
+        free(bmp_buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
+        return ESP_FAIL;
+    }
+
+    esp_err_t res;
+    res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+    if (res != ESP_OK) { free(y16_buf); free(bmp_buf); return res; }
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    ESP_LOGI(TAG, "Thermal MJPEG client connected (%ux%u)", tw, th);
+
+    char part_buf[128];
+    while (true) {
+        /* Wait ~111ms (9fps) */
+        vTaskDelay(pdMS_TO_TICKS(111));
+
+        if (!thermal_camera_get_frame(y16_buf)) continue;
+
+        size_t bmp_size = thermal_build_bmp(y16_buf, tw, th, bmp_buf, bmp_max);
+        if (bmp_size == 0) continue;
+
+        res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+        if (res == ESP_OK) {
+            size_t hlen = snprintf(part_buf, sizeof(part_buf),
+                "Content-Type: image/bmp\r\nContent-Length: %u\r\n\r\n",
+                (unsigned)bmp_size);
+            res = httpd_resp_send_chunk(req, part_buf, hlen);
+        }
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, (const char *)bmp_buf, bmp_size);
+        }
+        if (res != ESP_OK) break;
+    }
+
+    ESP_LOGI(TAG, "Thermal MJPEG client disconnected");
+    free(y16_buf);
+    free(bmp_buf);
+    return res;
+}
+
 /* ========== HTTP Server Setup ========== */
 
 static const httpd_uri_t uri_stream = {
@@ -912,6 +1056,12 @@ static const httpd_uri_t uri_status = {
     .handler = status_handler,
 };
 
+static const httpd_uri_t uri_thermal = {
+    .uri = "/thermal",
+    .method = HTTP_GET,
+    .handler = thermal_stream_handler,
+};
+
 httpd_handle_t camera_stream_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -923,9 +1073,11 @@ httpd_handle_t camera_stream_server_start(void)
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_register_uri_handler(server, &uri_stream);
         httpd_register_uri_handler(server, &uri_status);
+        httpd_register_uri_handler(server, &uri_thermal);
         ESP_LOGI(TAG, "Camera streaming started");
         ESP_LOGI(TAG, "  MJPEG:  http://<ip>/         (browser)");
         ESP_LOGI(TAG, "  H.264:  udp://broadcast:%d   (RTP, QGC/VLC)", RTP_PORT);
+        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser/VLC)");
         ESP_LOGI(TAG, "  Status: http://<ip>/status");
     } else {
         ESP_LOGE(TAG, "Failed to start HTTP server");
