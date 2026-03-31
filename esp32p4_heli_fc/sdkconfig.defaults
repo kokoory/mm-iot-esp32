@@ -35,6 +35,10 @@ CONFIG_MBEDTLS_NIST_KW_C=y
 # ── Timer profiling (matching reference) ──
 CONFIG_ESP_TIMER_PROFILING=y
 
+# ── USB Host (PureThermal Lepton has large UVC config descriptor) ──
+CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1024
+CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK=y
+
 # ── Logging (use RTOS ticks for timestamps — system time triggers
 #    _tzset_unlocked_r from ISR context causing lock_acquire_generic abort) ──
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
