@@ -29,7 +29,7 @@ static thermal_frame_cb_t s_user_cb = NULL;
 static void *s_user_ctx = NULL;
 
 /* UVC handles */
-static uvc_host_stream_handle_t s_stream = NULL;
+static uvc_host_stream_hdl_t s_stream = NULL;
 
 /* ------------------------------------------------------------------ */
 /* USB Host library event handler task                                 */
@@ -138,6 +138,7 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     uvc_host_driver_config_t uvc_config = {
         .driver_task_stack_size = 4096,
         .driver_task_priority = 5,
+        .xCoreID = 1,
         .create_background_task = true,
     };
     ret = uvc_host_install(&uvc_config);
@@ -159,10 +160,11 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
             .h_res = THERMAL_WIDTH,
             .v_res = THERMAL_HEIGHT,
             .fps = THERMAL_FPS,
-            .format = UVC_VS_FORMAT_UNCOMPRESSED,
+            .format = UVC_VS_FORMAT_YUY2,
         },
         .advanced = {
             .number_of_frame_buffers = 3,
+            .frame_size = THERMAL_FRAME_SIZE,
             .frame_heap_caps = MALLOC_CAP_SPIRAM,
             .number_of_urbs = 3,
             .urb_size = 10 * 1024,
