@@ -979,7 +979,7 @@ static esp_err_t thermal_page_handler(httpd_req_t *req)
 static esp_err_t thermal_raw_handler(httpd_req_t *req)
 {
     if (!thermal_camera_is_active()) {
-        httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE,
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Thermal camera not connected");
         return ESP_FAIL;
     }
@@ -996,7 +996,7 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
 
     if (!thermal_camera_get_frame(y16_buf)) {
         free(y16_buf);
-        httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE, "No frame available");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No frame available");
         return ESP_FAIL;
     }
 
