@@ -920,7 +920,7 @@ static const char THERMAL_HTML[] =
 "const canvas=document.getElementById('c');"
 "const ctx=canvas.getContext('2d');"
 "const info=document.getElementById('info');"
-"let frames=0,lastT=performance.now();"
+"let frames=0,lastT=performance.now(),pollMs=111,errCnt=0;"
 /* Iron colormap LUT (256 entries) */
 "const lut=new Uint8Array(256*3);"
 "for(let i=0;i<256;i++){"
@@ -936,7 +936,11 @@ static const char THERMAL_HTML[] =
 "async function poll(){"
 "  try{"
 "    const resp=await fetch('/thermal/raw');"
-"    if(!resp.ok){info.textContent='No thermal camera ('+resp.status+')';return;}"
+"    if(resp.status===204||!resp.ok){"
+"      errCnt++;pollMs=Math.min(5000,111*Math.pow(2,errCnt));"
+"      info.textContent=resp.status===204?'Thermal camera not connected (retry '+Math.round(pollMs/1000)+'s)':'Error '+resp.status;return;"
+"    }"
+"    errCnt=0;pollMs=111;"
 "    const tw=parseInt(resp.headers.get('X-Thermal-Width'))||80;"
 "    const th=parseInt(resp.headers.get('X-Thermal-Height'))||60;"
 "    if(tw!==w||th!==h){"
@@ -966,7 +970,7 @@ static const char THERMAL_HTML[] =
 "    }"
 "  }catch(e){info.textContent='Error: '+e.message;}"
 "}"
-"setInterval(poll,111);"
+"function loop(){poll().finally(()=>setTimeout(loop,pollMs));}loop();"
 "</script></body></html>";
 
 static esp_err_t thermal_page_handler(httpd_req_t *req)
@@ -979,9 +983,9 @@ static esp_err_t thermal_page_handler(httpd_req_t *req)
 static esp_err_t thermal_raw_handler(httpd_req_t *req)
 {
     if (!thermal_camera_is_active()) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                            "Thermal camera not connected");
-        return ESP_FAIL;
+        httpd_resp_set_status(req, "204 No Content");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        return httpd_resp_send(req, NULL, 0);
     }
 
     unsigned tw = thermal_camera_width();
@@ -990,14 +994,16 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
 
     uint16_t *y16_buf = heap_caps_malloc(frame_sz, MALLOC_CAP_SPIRAM);
     if (!y16_buf) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
-        return ESP_FAIL;
+        httpd_resp_set_status(req, "204 No Content");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        return httpd_resp_send(req, NULL, 0);
     }
 
     if (!thermal_camera_get_frame(y16_buf)) {
         free(y16_buf);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No frame available");
-        return ESP_FAIL;
+        httpd_resp_set_status(req, "204 No Content");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        return httpd_resp_send(req, NULL, 0);
     }
 
     httpd_resp_set_type(req, "application/octet-stream");
