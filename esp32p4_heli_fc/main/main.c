@@ -79,6 +79,12 @@ void app_main(void)
 
     /* Step 1: Initialize NVS + params */
     init_nvs();
+
+    /* Suppress verbose SPI logs — HaLow SPI on Core 1 can deadlock on
+     * the log mutex when Core 0 holds it during sensor/camera logging */
+    esp_log_level_set("spi_master", ESP_LOG_WARN);
+    esp_log_level_set("i2c.master", ESP_LOG_WARN);
+
     ESP_LOGI(TAG, "Initializing parameter system...");
     param_init();
 
