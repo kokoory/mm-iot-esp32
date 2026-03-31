@@ -123,10 +123,18 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
     if (!frame || !frame->data || !s_frame_size) return true;
 
     s_frame_count++;
-    if ((s_frame_count % 90) == 1) {
-        ESP_LOGI(TAG, "Thermal frame #%lu  len=%u  (expect %u)",
-                 (unsigned long)s_frame_count,
-                 (unsigned)frame->data_len, (unsigned)s_frame_size);
+    if (s_frame_count == 1) {
+        /* First frame: dump format diagnostics to help identify Y16 vs YUY2 */
+        const uint8_t *p = (const uint8_t *)frame->data;
+        const uint16_t *u16 = (const uint16_t *)frame->data;
+        ESP_LOGI(TAG, "First frame: len=%u expect=%u  bytes[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x  u16[0..3]=%u %u %u %u",
+                 (unsigned)frame->data_len, (unsigned)s_frame_size,
+                 p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                 u16[0], u16[1], u16[2], u16[3]);
+    }
+    if ((s_frame_count % 90) == 0) {
+        ESP_LOGI(TAG, "Thermal frame #%lu  len=%u",
+                 (unsigned long)s_frame_count, (unsigned)frame->data_len);
     }
 
     /* Copy to double buffer under mutex */
