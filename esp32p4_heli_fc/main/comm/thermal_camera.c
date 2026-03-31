@@ -121,6 +121,12 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         return ESP_ERR_NO_MEM;
     }
 
+    /* Enable USB debug logs for enumeration troubleshooting */
+    esp_log_level_set("ENUM", ESP_LOG_DEBUG);
+    esp_log_level_set("USB_HOST", ESP_LOG_DEBUG);
+    esp_log_level_set("UVC", ESP_LOG_DEBUG);
+    esp_log_level_set("uvc-host", ESP_LOG_DEBUG);
+
     /* Install USB Host Library */
     usb_host_config_t host_config = {
         .intr_flags = ESP_INTR_FLAG_LEVEL1,
