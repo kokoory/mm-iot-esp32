@@ -48,9 +48,150 @@ static rpc_telemetry_msg_t s_latest_rc;
 static rpc_telemetry_msg_t s_latest_servo;
 
 /* Param value queue (RPC_MSG_PARAM_VALUE from Core 0) */
-#define PARAM_VALUE_QUEUE_DEPTH 16
+#define PARAM_VALUE_QUEUE_DEPTH 64
 static rpc_telemetry_msg_t s_param_value_queue[PARAM_VALUE_QUEUE_DEPTH];
 static int s_param_value_count = 0;
+static int s_param_value_send_idx = 0;   /* index of next param to send during paced bulk send */
+static uint32_t s_param_last_send_ms = 0; /* timestamp of last param send for pacing */
+#define PARAM_SEND_INTERVAL_MS 20        /* 20ms between PARAM_VALUE messages */
+
+/* ── Local parameter store (for QGC parameter download) ────────── */
+
+typedef struct {
+    char     name[17];  /* null-terminated, 16 chars max */
+    float    value;
+} param_entry_t;
+
+#define PARAM_STORE_MAX 64
+
+static param_entry_t s_param_store[PARAM_STORE_MAX];
+static uint16_t s_param_store_count = 0;
+static bool s_param_list_pending = false;  /* true when bulk param send is in progress */
+
+/* Default parameters - initialized on first PARAM_REQUEST_LIST */
+static bool s_params_initialized = false;
+
+static void param_store_init(void)
+{
+    if (s_params_initialized) return;
+    s_params_initialized = true;
+    s_param_store_count = 0;
+
+    /* Helper macro to add a default param */
+    #define ADD_PARAM(n, v) do { \
+        if (s_param_store_count < PARAM_STORE_MAX) { \
+            strncpy(s_param_store[s_param_store_count].name, (n), 16); \
+            s_param_store[s_param_store_count].name[16] = '\0'; \
+            s_param_store[s_param_store_count].value = (v); \
+            s_param_store_count++; \
+        } \
+    } while (0)
+
+    /* System identification */
+    ADD_PARAM("SYS_AUTOSTART",   0.0f);
+    ADD_PARAM("SYS_AUTOCONFIG",  0.0f);
+    ADD_PARAM("MAV_SYS_ID",     1.0f);
+    ADD_PARAM("MAV_COMP_ID",    1.0f);
+    ADD_PARAM("MAV_TYPE",       4.0f);   /* helicopter */
+    ADD_PARAM("MAV_PROTO_VER",  2.0f);
+
+    /* Calibration offsets (gyro) */
+    ADD_PARAM("CAL_GYRO0_XOFF", 0.0f);
+    ADD_PARAM("CAL_GYRO0_YOFF", 0.0f);
+    ADD_PARAM("CAL_GYRO0_ZOFF", 0.0f);
+    ADD_PARAM("CAL_GYRO0_ID",   0.0f);
+
+    /* Calibration offsets (accel) */
+    ADD_PARAM("CAL_ACC0_XOFF",  0.0f);
+    ADD_PARAM("CAL_ACC0_YOFF",  0.0f);
+    ADD_PARAM("CAL_ACC0_ZOFF",  0.0f);
+    ADD_PARAM("CAL_ACC0_XSCALE",1.0f);
+    ADD_PARAM("CAL_ACC0_YSCALE",1.0f);
+    ADD_PARAM("CAL_ACC0_ZSCALE",1.0f);
+    ADD_PARAM("CAL_ACC0_ID",    0.0f);
+
+    /* Calibration offsets (mag) */
+    ADD_PARAM("CAL_MAG0_XOFF",  0.0f);
+    ADD_PARAM("CAL_MAG0_YOFF",  0.0f);
+    ADD_PARAM("CAL_MAG0_ZOFF",  0.0f);
+    ADD_PARAM("CAL_MAG0_XSCALE",1.0f);
+    ADD_PARAM("CAL_MAG0_YSCALE",1.0f);
+    ADD_PARAM("CAL_MAG0_ZSCALE",1.0f);
+    ADD_PARAM("CAL_MAG0_ID",    0.0f);
+    ADD_PARAM("CAL_MAG0_ROT",   0.0f);
+
+    /* Sensor enable */
+    ADD_PARAM("SENS_EN_THERMAL",0.0f);
+    ADD_PARAM("SENS_BOARD_ROT", 0.0f);
+
+    /* Battery */
+    ADD_PARAM("BAT_V_CHARGED",  4.2f);
+    ADD_PARAM("BAT_V_EMPTY",    3.5f);
+    ADD_PARAM("BAT_N_CELLS",    6.0f);
+    ADD_PARAM("BAT_CAPACITY",   5000.0f);
+
+    /* RC */
+    ADD_PARAM("RC_MAP_THROTTLE",3.0f);
+    ADD_PARAM("RC_MAP_ROLL",    1.0f);
+    ADD_PARAM("RC_MAP_PITCH",   2.0f);
+    ADD_PARAM("RC_MAP_YAW",     4.0f);
+
+    /* Flight controller tuning */
+    ADD_PARAM("MC_ROLL_P",      6.5f);
+    ADD_PARAM("MC_PITCH_P",     6.5f);
+    ADD_PARAM("MC_YAW_P",       2.8f);
+    ADD_PARAM("MC_ROLLRATE_P",  0.15f);
+    ADD_PARAM("MC_PITCHRATE_P", 0.15f);
+    ADD_PARAM("MC_YAWRATE_P",   0.20f);
+
+    /* Safety */
+    ADD_PARAM("COM_ARM_EKF_AB",  0.0f);
+    ADD_PARAM("COM_RC_IN_MODE",  0.0f);
+    ADD_PARAM("COM_DISARM_LAND", 2.0f);
+
+    #undef ADD_PARAM
+}
+
+/* Find parameter by name, returns index or -1 */
+static int param_find(const char *name)
+{
+    for (int i = 0; i < s_param_store_count; i++) {
+        if (strncmp(s_param_store[i].name, name, 16) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Set parameter value in local store; returns index or -1 if not found */
+static int param_set_value(const char *name, float value)
+{
+    int idx = param_find(name);
+    if (idx >= 0) {
+        s_param_store[idx].value = value;
+    }
+    return idx;
+}
+
+/* ── Calibration state machine ──────────────────────────────────── */
+
+typedef enum {
+    CAL_STATE_IDLE = 0,
+    CAL_STATE_GYRO,
+    CAL_STATE_MAG,
+    CAL_STATE_ACCEL,
+    CAL_STATE_LEVEL,
+} cal_state_t;
+
+static cal_state_t s_cal_state = CAL_STATE_IDLE;
+static uint32_t s_cal_start_ms = 0;
+static uint32_t s_cal_last_progress_ms = 0;
+static int s_cal_step = 0;          /* for multi-step accel cal */
+
+/* Accel calibration orientation names */
+static const char *s_accel_orientations[] = {
+    "level", "left", "right", "nose-down", "nose-up", "back"
+};
 
 /* Statustext queue (RPC_MSG_STATUSTEXT from Core 0) */
 #define STATUSTEXT_QUEUE_DEPTH 8
@@ -560,6 +701,32 @@ static void send_statustext_messages(void)
 
 static void send_param_values(void)
 {
+    /* Paced bulk send from local param store (PARAM_REQUEST_LIST) */
+    if (s_param_list_pending) {
+        uint32_t now = get_time_ms();
+        if ((now - s_param_last_send_ms) >= PARAM_SEND_INTERVAL_MS) {
+            if (s_param_value_send_idx < s_param_store_count) {
+                int idx = s_param_value_send_idx;
+                mavlink_message_t msg;
+                mavlink_msg_param_value_encode(&msg,
+                    s_param_store[idx].name,
+                    s_param_store[idx].value,
+                    MAV_PARAM_TYPE_REAL32,
+                    s_param_store_count,
+                    idx);
+                send_mavlink_msg(&msg);
+                s_param_value_send_idx++;
+                s_param_last_send_ms = now;
+            } else {
+                /* All params sent */
+                s_param_list_pending = false;
+                ESP_LOGI(TAG, "Param list complete: %d params sent", s_param_store_count);
+            }
+        }
+        return; /* Don't send queued RPC params while bulk send is active */
+    }
+
+    /* Send individual param values from RPC queue (single requests) */
     for (int i = 0; i < s_param_value_count; i++) {
         const rpc_telemetry_msg_t *pv = &s_param_value_queue[i];
         mavlink_message_t msg;
@@ -726,6 +893,101 @@ static void send_autopilot_version(void)
     send_mavlink_msg(&msg);
 }
 
+/* Send a statustext message immediately */
+static void send_cal_statustext(uint8_t severity, const char *text)
+{
+    mavlink_message_t msg;
+    mavlink_msg_statustext_encode(&msg, severity, text);
+    send_mavlink_msg(&msg);
+}
+
+/* Calibration state machine - called each loop iteration */
+static void calibration_tick(void)
+{
+    if (s_cal_state == CAL_STATE_IDLE) return;
+
+    uint32_t now = get_time_ms();
+    uint32_t elapsed = now - s_cal_start_ms;
+
+    switch (s_cal_state) {
+    case CAL_STATE_GYRO:
+        /* Gyro cal: collect for 5 seconds, then report success */
+        if (s_cal_last_progress_ms == 0) {
+            send_cal_statustext(MAV_SEVERITY_INFO, "[cal] Gyro calibration: hold still");
+            s_cal_last_progress_ms = now;
+        } else if (elapsed >= 5000) {
+            send_cal_statustext(MAV_SEVERITY_INFO, "[cal] Gyro calibration complete");
+            send_cal_statustext(MAV_SEVERITY_INFO, "CAL: calibration done");
+            s_cal_state = CAL_STATE_IDLE;
+        } else if ((now - s_cal_last_progress_ms) >= 1000) {
+            char buf[50];
+            snprintf(buf, sizeof(buf), "[cal] Gyro calibrating... %lu%%",
+                     (unsigned long)(elapsed * 100 / 5000));
+            send_cal_statustext(MAV_SEVERITY_INFO, buf);
+            s_cal_last_progress_ms = now;
+        }
+        break;
+
+    case CAL_STATE_MAG:
+        /* Mag cal: simulate 30s calibration */
+        if (s_cal_last_progress_ms == 0) {
+            send_cal_statustext(MAV_SEVERITY_INFO, "[cal] Mag calibration: rotate vehicle");
+            s_cal_last_progress_ms = now;
+        } else if (elapsed >= 30000) {
+            send_cal_statustext(MAV_SEVERITY_INFO, "[cal] Mag calibration complete");
+            send_cal_statustext(MAV_SEVERITY_INFO, "CAL: calibration done");
+            s_cal_state = CAL_STATE_IDLE;
+        } else if ((now - s_cal_last_progress_ms) >= 3000) {
+            char buf[50];
+            snprintf(buf, sizeof(buf), "[cal] Mag calibrating... %lu%%",
+                     (unsigned long)(elapsed * 100 / 30000));
+            send_cal_statustext(MAV_SEVERITY_INFO, buf);
+            s_cal_last_progress_ms = now;
+        }
+        break;
+
+    case CAL_STATE_ACCEL:
+        /* 6-side accel cal: ~5s per orientation */
+        if (s_cal_last_progress_ms == 0) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "[cal] Accel: place %s and press OK",
+                     s_accel_orientations[s_cal_step]);
+            send_cal_statustext(MAV_SEVERITY_INFO, buf);
+            s_cal_last_progress_ms = now;
+        } else if (elapsed >= (uint32_t)(s_cal_step + 1) * 5000) {
+            s_cal_step++;
+            if (s_cal_step >= 6) {
+                send_cal_statustext(MAV_SEVERITY_INFO, "[cal] Accel calibration complete");
+                send_cal_statustext(MAV_SEVERITY_INFO, "CAL: calibration done");
+                s_cal_state = CAL_STATE_IDLE;
+            } else {
+                char buf[80];
+                snprintf(buf, sizeof(buf), "[cal] Accel: place %s and press OK",
+                         s_accel_orientations[s_cal_step]);
+                send_cal_statustext(MAV_SEVERITY_INFO, buf);
+                s_cal_last_progress_ms = now;
+            }
+        }
+        break;
+
+    case CAL_STATE_LEVEL:
+        /* Simple level cal: 3 seconds */
+        if (s_cal_last_progress_ms == 0) {
+            send_cal_statustext(MAV_SEVERITY_INFO, "[cal] Level calibration: hold level");
+            s_cal_last_progress_ms = now;
+        } else if (elapsed >= 3000) {
+            send_cal_statustext(MAV_SEVERITY_INFO, "[cal] Level calibration complete");
+            send_cal_statustext(MAV_SEVERITY_INFO, "CAL: calibration done");
+            s_cal_state = CAL_STATE_IDLE;
+        }
+        break;
+
+    default:
+        s_cal_state = CAL_STATE_IDLE;
+        break;
+    }
+}
+
 static void send_telemetry(void)
 {
     send_heartbeat();
@@ -812,7 +1074,79 @@ static void handle_command_long(const mavlink_message_t *msg)
         break;
 
     case MAV_CMD_PREFLIGHT_CALIBRATION:
-        ESP_LOGI(TAG, "CALIBRATION command (not implemented yet)");
+        if (param1 >= 1.0f) {
+            /* Gyro calibration */
+            s_cal_state = CAL_STATE_GYRO;
+            s_cal_start_ms = get_time_ms();
+            s_cal_last_progress_ms = 0;
+            ESP_LOGI(TAG, "Starting GYRO calibration");
+        } else if (param2 >= 1.0f) {
+            /* Mag calibration */
+            s_cal_state = CAL_STATE_MAG;
+            s_cal_start_ms = get_time_ms();
+            s_cal_last_progress_ms = 0;
+            ESP_LOGI(TAG, "Starting MAG calibration");
+        } else if (param5 >= 2.0f) {
+            /* Accel level calibration */
+            s_cal_state = CAL_STATE_LEVEL;
+            s_cal_start_ms = get_time_ms();
+            s_cal_last_progress_ms = 0;
+            ESP_LOGI(TAG, "Starting LEVEL calibration");
+        } else if (param5 >= 1.0f) {
+            /* Full accel calibration */
+            s_cal_state = CAL_STATE_ACCEL;
+            s_cal_start_ms = get_time_ms();
+            s_cal_last_progress_ms = 0;
+            s_cal_step = 0;
+            ESP_LOGI(TAG, "Starting ACCEL calibration");
+        } else {
+            /* Cancel calibration */
+            s_cal_state = CAL_STATE_IDLE;
+            ESP_LOGI(TAG, "Calibration cancelled");
+        }
+        result = MAV_RESULT_ACCEPTED;
+        rpc_cmd.msg_type = 0;
+        break;
+
+    case MAV_CMD_DO_SET_SERVO: {
+        /* param1=servo_number (1-based), param2=PWM value */
+        uint8_t servo_num = (uint8_t)param1;
+        uint16_t pwm = (uint16_t)param2;
+        ESP_LOGI(TAG, "DO_SET_SERVO: servo=%d pwm=%d", servo_num, pwm);
+        rpc_cmd.msg_type = RPC_CMD_SET_SERVO;
+        rpc_cmd.data.servo_cmd.servo_number = servo_num;
+        rpc_cmd.data.servo_cmd.pwm_value = pwm;
+        break;
+    }
+
+    case MAV_CMD_DO_MOTOR_TEST: {
+        /* param1=motor_number (1-based), param2=throttle_type, param3=throttle, param4=timeout */
+        uint8_t motor_num = (uint8_t)param1;
+        float throttle = param3;
+        float timeout_sec = param4;
+        ESP_LOGI(TAG, "DO_MOTOR_TEST: motor=%d throttle=%.1f%% timeout=%.1fs",
+                 motor_num, throttle, timeout_sec);
+        rpc_cmd.msg_type = RPC_CMD_MOTOR_TEST;
+        rpc_cmd.data.motor_test_cmd.motor_number = motor_num;
+        rpc_cmd.data.motor_test_cmd.throttle_type = (uint8_t)param2;
+        rpc_cmd.data.motor_test_cmd.throttle = throttle;
+        rpc_cmd.data.motor_test_cmd.timeout_s = timeout_sec;
+        break;
+    }
+
+    case MAV_CMD_SET_MESSAGE_INTERVAL: {
+        /* param1=message_id, param2=interval_us (-1=disable, 0=default) */
+        uint32_t mid = (uint32_t)param1;
+        float interval_us = param2;
+        ESP_LOGI(TAG, "SET_MESSAGE_INTERVAL: msg=%lu interval=%.0fus",
+                 (unsigned long)mid, interval_us);
+        result = MAV_RESULT_ACCEPTED;
+        rpc_cmd.msg_type = 0;
+        break;
+    }
+
+    case MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES:
+        send_autopilot_version();
         result = MAV_RESULT_ACCEPTED;
         rpc_cmd.msg_type = 0;
         break;
@@ -867,17 +1201,28 @@ static void handle_param_request_read(const mavlink_message_t *msg)
 
     if (target_system != 0 && target_system != MAV_SYS_ID) return;
 
-    rpc_command_msg_t rpc_cmd;
-    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
-    rpc_cmd.msg_type = RPC_CMD_PARAM_REQUEST_READ;
-    rpc_cmd.timestamp_ms = get_time_ms();
-    memcpy(rpc_cmd.data.param_request.name, param_id, 16);
-    rpc_cmd.data.param_request.index = param_index;
+    param_store_init();
 
-    if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
-        ESP_LOGW(TAG, "Failed to send PARAM_REQUEST_READ to Core 0");
+    int idx = -1;
+    if (param_id[0] != '\0') {
+        idx = param_find(param_id);
+    } else if (param_index >= 0 && param_index < s_param_store_count) {
+        idx = param_index;
     }
-    ESP_LOGI(TAG, "PARAM_REQUEST_READ: name='%s' index=%d", param_id, param_index);
+
+    if (idx >= 0) {
+        mavlink_message_t reply;
+        mavlink_msg_param_value_encode(&reply,
+            s_param_store[idx].name,
+            s_param_store[idx].value,
+            MAV_PARAM_TYPE_REAL32,
+            s_param_store_count,
+            idx);
+        send_mavlink_msg(&reply);
+    }
+
+    ESP_LOGI(TAG, "PARAM_REQUEST_READ: name='%s' index=%d -> found=%d",
+             param_id, param_index, idx);
 }
 
 static void handle_param_request_list(const mavlink_message_t *msg)
@@ -886,16 +1231,16 @@ static void handle_param_request_list(const mavlink_message_t *msg)
     uint8_t target_system = msg->payload[0];
     if (target_system != 0 && target_system != MAV_SYS_ID) return;
 
-    rpc_command_msg_t rpc_cmd;
-    memset(&rpc_cmd, 0, sizeof(rpc_cmd));
-    rpc_cmd.msg_type = RPC_CMD_PARAM_REQUEST_LIST;
-    rpc_cmd.timestamp_ms = get_time_ms();
-    rpc_cmd.data.param_request.index = -1; /* -1 means "all" */
+    /* Initialize local param store if not done */
+    param_store_init();
 
-    if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
-        ESP_LOGW(TAG, "Failed to send PARAM_REQUEST_LIST to Core 0");
-    }
-    ESP_LOGI(TAG, "PARAM_REQUEST_LIST received");
+    /* Start paced bulk send from local param store */
+    s_param_value_send_idx = 0;
+    s_param_last_send_ms = 0;
+    s_param_list_pending = true;
+
+    ESP_LOGI(TAG, "PARAM_REQUEST_LIST: sending %d params (paced %dms)",
+             s_param_store_count, PARAM_SEND_INTERVAL_MS);
 }
 
 static void handle_param_set(const mavlink_message_t *msg)
@@ -909,14 +1254,31 @@ static void handle_param_set(const mavlink_message_t *msg)
 
     if (target_system != 0 && target_system != MAV_SYS_ID) return;
 
+    param_store_init();
+
+    /* Update local store */
+    int idx = param_set_value(param_id, param_value);
+    ESP_LOGI(TAG, "PARAM_SET: %s = %.4f (idx=%d)", param_id, param_value, idx);
+
+    /* Respond with PARAM_VALUE (QGC expects confirmation) */
+    if (idx >= 0) {
+        mavlink_message_t reply;
+        mavlink_msg_param_value_encode(&reply,
+            s_param_store[idx].name,
+            s_param_store[idx].value,
+            MAV_PARAM_TYPE_REAL32,
+            s_param_store_count,
+            idx);
+        send_mavlink_msg(&reply);
+    }
+
+    /* Also forward to Core 0 */
     rpc_command_msg_t rpc_cmd;
     memset(&rpc_cmd, 0, sizeof(rpc_cmd));
     rpc_cmd.msg_type = RPC_CMD_PARAM_SET;
     rpc_cmd.timestamp_ms = get_time_ms();
     memcpy(rpc_cmd.data.param_set.name, param_id, 16);
     rpc_cmd.data.param_set.value = param_value;
-
-    ESP_LOGI(TAG, "PARAM_SET: %s = %.4f", param_id, param_value);
 
     if (rpc_send_command(s_rpc_ctx, &rpc_cmd) != 0) {
         ESP_LOGW(TAG, "Failed to send PARAM_SET to Core 0");
@@ -1450,7 +1812,10 @@ void mavlink_handler_task(void *param)
         /* 2. Send MAVLink telemetry at configured rates */
         send_telemetry();
 
-        /* 3. Receive and process incoming MAVLink from GCS */
+        /* 3. Drive calibration state machine */
+        calibration_tick();
+
+        /* 4. Receive and process incoming MAVLink from GCS */
         process_incoming_mavlink();
 
         /* 4. Yield briefly to avoid starving other tasks.

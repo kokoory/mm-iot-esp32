@@ -899,93 +899,88 @@ static esp_err_t status_handler(httpd_req_t *req)
     return httpd_resp_send(req, buf, strlen(buf));
 }
 
-/* ========== Thermal Camera MJPEG Stream ========== */
+/* ========== Thermal Camera HTML Viewer & Raw Endpoint ========== */
 
 /*
- * Minimal BMP builder for grayscale image (8-bit, 256-entry palette).
- * BMP is simple, no compression library needed, and browsers render it natively.
- * For 80x60 the BMP is only ~5.8KB — fine for 9fps over HaLow.
+ * Self-contained HTML page that fetches raw Y16 data from /thermal/raw
+ * and renders it on a canvas with iron colormap.  No external dependencies.
  */
-static size_t thermal_build_bmp(const uint16_t *y16, unsigned w, unsigned h, uint8_t *out, size_t out_size)
+static const char THERMAL_HTML[] =
+"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+"<title>Thermal Camera</title>"
+"<style>"
+"body{background:#111;color:#eee;font-family:monospace;margin:0;display:flex;"
+"flex-direction:column;align-items:center;justify-content:center;height:100vh}"
+"canvas{image-rendering:pixelated;border:1px solid #444}"
+"#info{margin-top:8px;font-size:14px}"
+"</style></head><body>"
+"<canvas id='c'></canvas>"
+"<div id='info'>Connecting...</div>"
+"<script>"
+"const canvas=document.getElementById('c');"
+"const ctx=canvas.getContext('2d');"
+"const info=document.getElementById('info');"
+"let frames=0,lastT=performance.now();"
+/* Iron colormap LUT (256 entries) */
+"const lut=new Uint8Array(256*3);"
+"for(let i=0;i<256;i++){"
+"  let r,g,b;"
+"  if(i<64){r=0;g=0;b=i*4;}"
+"  else if(i<128){let t=(i-64)*4;r=t;g=0;b=255-t;}"
+"  else if(i<192){let t=(i-128)*4;r=255;g=t;b=0;}"
+"  else{let t=(i-192)*4;r=255;g=255;b=t;}"
+"  lut[i*3]=r;lut[i*3+1]=g;lut[i*3+2]=b;"
+"}"
+"const SCALE=4;"
+"let imgData=null,w=0,h=0;"
+"async function poll(){"
+"  try{"
+"    const resp=await fetch('/thermal/raw');"
+"    if(!resp.ok){info.textContent='No thermal camera ('+resp.status+')';return;}"
+"    const tw=parseInt(resp.headers.get('X-Thermal-Width'))||80;"
+"    const th=parseInt(resp.headers.get('X-Thermal-Height'))||60;"
+"    if(tw!==w||th!==h){"
+"      w=tw;h=th;canvas.width=w;canvas.height=h;"
+"      canvas.style.width=(w*SCALE)+'px';canvas.style.height=(h*SCALE)+'px';"
+"      imgData=ctx.createImageData(w,h);"
+"    }"
+"    const buf=await resp.arrayBuffer();"
+"    const y16=new Uint16Array(buf);"
+"    let vmin=65535,vmax=0;"
+"    for(let i=0;i<y16.length;i++){if(y16[i]<vmin)vmin=y16[i];if(y16[i]>vmax)vmax=y16[i];}"
+"    const range=vmax>vmin?vmax-vmin:1;"
+"    const d=imgData.data;"
+"    for(let i=0;i<y16.length;i++){"
+"      const idx=Math.round((y16[i]-vmin)*255/range);"
+"      d[i*4]=lut[idx*3];d[i*4+1]=lut[idx*3+1];d[i*4+2]=lut[idx*3+2];d[i*4+3]=255;"
+"    }"
+"    ctx.putImageData(imgData,0,0);"
+"    frames++;"
+"    const now=performance.now();"
+"    if(now-lastT>=1000){"
+"      const fps=(frames*1000/(now-lastT)).toFixed(1);"
+"      const tminC=(vmin/100-273.15).toFixed(1);"
+"      const tmaxC=(vmax/100-273.15).toFixed(1);"
+"      info.textContent=w+'x'+h+' | '+fps+' fps | min '+tminC+'C  max '+tmaxC+'C';"
+"      frames=0;lastT=now;"
+"    }"
+"  }catch(e){info.textContent='Error: '+e.message;}"
+"}"
+"setInterval(poll,111);"
+"</script></body></html>";
+
+static esp_err_t thermal_page_handler(httpd_req_t *req)
 {
-    /* BMP file header (14) + DIB header (40) + palette (256*4) + pixel data */
-    const size_t palette_size = 256 * 4;
-    const size_t row_bytes = (w + 3) & ~3;  /* rows padded to 4-byte boundary */
-    const size_t pixel_data_size = row_bytes * h;
-    const size_t header_size = 14 + 40 + palette_size;
-    const size_t file_size = header_size + pixel_data_size;
-
-    if (file_size > out_size) return 0;
-
-    memset(out, 0, header_size);
-
-    /* Find min/max for auto-ranging */
-    uint16_t vmin = 0xFFFF, vmax = 0;
-    size_t npix = w * h;
-    for (size_t i = 0; i < npix; i++) {
-        if (y16[i] < vmin) vmin = y16[i];
-        if (y16[i] > vmax) vmax = y16[i];
-    }
-    uint16_t range = (vmax > vmin) ? (vmax - vmin) : 1;
-
-    /* BMP file header */
-    out[0] = 'B'; out[1] = 'M';
-    out[2] = file_size & 0xFF; out[3] = (file_size >> 8) & 0xFF;
-    out[4] = (file_size >> 16) & 0xFF; out[5] = (file_size >> 24) & 0xFF;
-    out[10] = header_size & 0xFF; out[11] = (header_size >> 8) & 0xFF;
-
-    /* DIB header (BITMAPINFOHEADER) */
-    out[14] = 40;  /* header size */
-    out[18] = w & 0xFF; out[19] = (w >> 8) & 0xFF;
-    out[22] = h & 0xFF; out[23] = (h >> 8) & 0xFF;
-    out[26] = 1;   /* color planes */
-    out[28] = 8;   /* bits per pixel */
-    /* compression = 0 (BI_RGB), already zeroed */
-
-    /* Grayscale palette (iron colormap for thermal: black → blue → red → yellow → white) */
-    uint8_t *pal = out + 14 + 40;
-    for (int i = 0; i < 256; i++) {
-        uint8_t r, g, b;
-        if (i < 64) {
-            /* Black to blue */
-            r = 0; g = 0; b = i * 4;
-        } else if (i < 128) {
-            /* Blue to red */
-            uint8_t t = (i - 64) * 4;
-            r = t; g = 0; b = 255 - t;
-        } else if (i < 192) {
-            /* Red to yellow */
-            uint8_t t = (i - 128) * 4;
-            r = 255; g = t; b = 0;
-        } else {
-            /* Yellow to white */
-            uint8_t t = (i - 192) * 4;
-            r = 255; g = 255; b = t;
-        }
-        pal[i * 4 + 0] = b;  /* BMP is BGR */
-        pal[i * 4 + 1] = g;
-        pal[i * 4 + 2] = r;
-        pal[i * 4 + 3] = 0;
-    }
-
-    /* Pixel data — BMP stores bottom-to-top */
-    uint8_t *pixels = out + header_size;
-    for (unsigned row = 0; row < h; row++) {
-        unsigned src_row = (h - 1 - row);  /* flip vertically */
-        const uint16_t *src = y16 + src_row * w;
-        uint8_t *dst = pixels + row * row_bytes;
-        for (unsigned col = 0; col < w; col++) {
-            dst[col] = (uint8_t)(((uint32_t)(src[col] - vmin) * 255) / range);
-        }
-    }
-
-    return file_size;
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, THERMAL_HTML, strlen(THERMAL_HTML));
 }
 
-static esp_err_t thermal_stream_handler(httpd_req_t *req)
+static esp_err_t thermal_raw_handler(httpd_req_t *req)
 {
     if (!thermal_camera_is_active()) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Thermal camera not connected");
+        httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE,
+                            "Thermal camera not connected");
         return ESP_FAIL;
     }
 
@@ -993,52 +988,31 @@ static esp_err_t thermal_stream_handler(httpd_req_t *req)
     unsigned th = thermal_camera_height();
     size_t frame_sz = thermal_camera_frame_size();
 
-    /* Allocate buffers for Y16 frame + BMP output */
     uint16_t *y16_buf = heap_caps_malloc(frame_sz, MALLOC_CAP_SPIRAM);
-    /* BMP: header(14) + DIB(40) + palette(1024) + pixels(padded) */
-    size_t bmp_max = 14 + 40 + 1024 + ((tw + 3) & ~3) * th + 64;
-    uint8_t *bmp_buf = heap_caps_malloc(bmp_max, MALLOC_CAP_SPIRAM);
-
-    if (!y16_buf || !bmp_buf) {
-        free(y16_buf);
-        free(bmp_buf);
+    if (!y16_buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
         return ESP_FAIL;
     }
 
-    esp_err_t res;
-    res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
-    if (res != ESP_OK) { free(y16_buf); free(bmp_buf); return res; }
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-
-    ESP_LOGI(TAG, "Thermal MJPEG client connected (%ux%u)", tw, th);
-
-    char part_buf[128];
-    while (true) {
-        /* Wait ~111ms (9fps) */
-        vTaskDelay(pdMS_TO_TICKS(111));
-
-        if (!thermal_camera_get_frame(y16_buf)) continue;
-
-        size_t bmp_size = thermal_build_bmp(y16_buf, tw, th, bmp_buf, bmp_max);
-        if (bmp_size == 0) continue;
-
-        res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
-        if (res == ESP_OK) {
-            size_t hlen = snprintf(part_buf, sizeof(part_buf),
-                "Content-Type: image/bmp\r\nContent-Length: %u\r\n\r\n",
-                (unsigned)bmp_size);
-            res = httpd_resp_send_chunk(req, part_buf, hlen);
-        }
-        if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, (const char *)bmp_buf, bmp_size);
-        }
-        if (res != ESP_OK) break;
+    if (!thermal_camera_get_frame(y16_buf)) {
+        free(y16_buf);
+        httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE, "No frame available");
+        return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Thermal MJPEG client disconnected");
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Expose-Headers",
+                       "X-Thermal-Width,X-Thermal-Height");
+
+    char w_str[12], h_str[12];
+    snprintf(w_str, sizeof(w_str), "%u", tw);
+    snprintf(h_str, sizeof(h_str), "%u", th);
+    httpd_resp_set_hdr(req, "X-Thermal-Width", w_str);
+    httpd_resp_set_hdr(req, "X-Thermal-Height", h_str);
+
+    esp_err_t res = httpd_resp_send(req, (const char *)y16_buf, frame_sz);
     free(y16_buf);
-    free(bmp_buf);
     return res;
 }
 
@@ -1059,7 +1033,13 @@ static const httpd_uri_t uri_status = {
 static const httpd_uri_t uri_thermal = {
     .uri = "/thermal",
     .method = HTTP_GET,
-    .handler = thermal_stream_handler,
+    .handler = thermal_page_handler,
+};
+
+static const httpd_uri_t uri_thermal_raw = {
+    .uri = "/thermal/raw",
+    .method = HTTP_GET,
+    .handler = thermal_raw_handler,
 };
 
 httpd_handle_t camera_stream_server_start(void)
@@ -1074,10 +1054,11 @@ httpd_handle_t camera_stream_server_start(void)
         httpd_register_uri_handler(server, &uri_stream);
         httpd_register_uri_handler(server, &uri_status);
         httpd_register_uri_handler(server, &uri_thermal);
+        httpd_register_uri_handler(server, &uri_thermal_raw);
         ESP_LOGI(TAG, "Camera streaming started");
         ESP_LOGI(TAG, "  MJPEG:  http://<ip>/         (browser)");
         ESP_LOGI(TAG, "  H.264:  udp://broadcast:%d   (RTP, QGC/VLC)", RTP_PORT);
-        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser/VLC)");
+        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser)");
         ESP_LOGI(TAG, "  Status: http://<ip>/status");
     } else {
         ESP_LOGE(TAG, "Failed to start HTTP server");

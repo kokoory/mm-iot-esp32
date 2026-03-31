@@ -9,6 +9,10 @@
 #include "thermal_camera.h"
 
 #include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -37,6 +41,16 @@ static void *s_user_ctx = NULL;
 /* UVC handles */
 static uvc_host_stream_hdl_t s_stream = NULL;
 
+/* UDP RTP streaming on port 5601 */
+#define THERMAL_RTP_PORT    5601
+#define THERMAL_RTP_MTU     1400
+#define THERMAL_RTP_PT      96
+#define THERMAL_RTP_SSRC    0x54484552  /* 'THER' */
+static int s_rtp_sock = -1;
+static struct sockaddr_in s_rtp_dest;
+static uint16_t s_rtp_seq = 0;
+static uint32_t s_rtp_timestamp = 0;
+
 /* ------------------------------------------------------------------ */
 /* USB Host library event handler task                                 */
 /* ------------------------------------------------------------------ */
@@ -56,12 +70,64 @@ static void usb_host_lib_task(void *param)
 }
 
 /* ------------------------------------------------------------------ */
+/* UDP RTP thermal frame sender                                        */
+/* ------------------------------------------------------------------ */
+
+static void rtp_send_thermal_frame(const uint8_t *data, size_t len)
+{
+    if (s_rtp_sock < 0 || len == 0) return;
+
+    uint8_t pkt[12 + THERMAL_RTP_MTU];
+    size_t offset = 0;
+
+    while (offset < len) {
+        size_t chunk = len - offset;
+        bool last = true;
+        if (chunk > THERMAL_RTP_MTU) {
+            chunk = THERMAL_RTP_MTU;
+            last = false;
+        }
+
+        /* RTP header */
+        pkt[0] = 0x80;
+        pkt[1] = THERMAL_RTP_PT | (last ? 0x80 : 0);  /* marker on last packet */
+        pkt[2] = (s_rtp_seq >> 8) & 0xFF;
+        pkt[3] = s_rtp_seq & 0xFF;
+        pkt[4] = (s_rtp_timestamp >> 24) & 0xFF;
+        pkt[5] = (s_rtp_timestamp >> 16) & 0xFF;
+        pkt[6] = (s_rtp_timestamp >> 8) & 0xFF;
+        pkt[7] = s_rtp_timestamp & 0xFF;
+        pkt[8] = (THERMAL_RTP_SSRC >> 24) & 0xFF;
+        pkt[9] = (THERMAL_RTP_SSRC >> 16) & 0xFF;
+        pkt[10] = (THERMAL_RTP_SSRC >> 8) & 0xFF;
+        pkt[11] = THERMAL_RTP_SSRC & 0xFF;
+
+        memcpy(pkt + 12, data + offset, chunk);
+        sendto(s_rtp_sock, pkt, 12 + chunk, 0,
+               (struct sockaddr *)&s_rtp_dest, sizeof(s_rtp_dest));
+        s_rtp_seq++;
+        offset += chunk;
+    }
+
+    s_rtp_timestamp += 90000 / 9;  /* 90kHz clock / 9fps */
+}
+
+/* ------------------------------------------------------------------ */
 /* UVC frame callback                                                  */
 /* ------------------------------------------------------------------ */
 
 static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
 {
+    static uint32_t s_frame_count = 0;
+
     if (!frame || !frame->data || !s_frame_size) return true;
+
+    s_frame_count++;
+    if ((s_frame_count % 90) == 1) {
+        ESP_LOGI(TAG, "Thermal frame #%lu  len=%u  (expect %u)",
+                 (unsigned long)s_frame_count,
+                 (unsigned)frame->data_len, (unsigned)s_frame_size);
+    }
 
     /* Copy to double buffer under mutex */
     if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
@@ -70,6 +136,9 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
         s_frame_valid = true;
         xSemaphoreGive(s_frame_mutex);
     }
+
+    /* Send via UDP RTP */
+    rtp_send_thermal_frame(frame->data, frame->data_len);
 
     /* Notify user callback */
     if (s_user_cb) {
@@ -156,9 +225,9 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
             .pid = 0x0100,  /* PureThermal PID */
         },
         .vs_format = {
-            .h_res = 0,     /* 0 = accept any resolution */
-            .v_res = 0,
-            .fps = 0,       /* 0 = accept any frame rate */
+            .h_res = 160,   /* Lepton 3.5 native 160x120 */
+            .v_res = 120,
+            .fps = 9,       /* ~9fps for Lepton */
             .format = UVC_VS_FORMAT_DEFAULT,
         },
         .advanced = {
@@ -199,6 +268,22 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     if (!s_frame_buf) {
         ESP_LOGE(TAG, "Failed to allocate frame buffer (%u bytes)", (unsigned)s_frame_size);
         return ESP_ERR_NO_MEM;
+    }
+
+    /* Create UDP RTP socket for thermal streaming on port 5601 */
+    s_rtp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_rtp_sock >= 0) {
+        memset(&s_rtp_dest, 0, sizeof(s_rtp_dest));
+        s_rtp_dest.sin_family = AF_INET;
+        s_rtp_dest.sin_port = htons(THERMAL_RTP_PORT);
+        s_rtp_dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+        int broadcast = 1;
+        setsockopt(s_rtp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+        int flags = fcntl(s_rtp_sock, F_GETFL, 0);
+        fcntl(s_rtp_sock, F_SETFL, flags | O_NONBLOCK);
+        s_rtp_seq = 0;
+        s_rtp_timestamp = 0;
+        ESP_LOGI(TAG, "Thermal RTP socket ready (broadcast port %d)", THERMAL_RTP_PORT);
     }
 
     s_active = true;

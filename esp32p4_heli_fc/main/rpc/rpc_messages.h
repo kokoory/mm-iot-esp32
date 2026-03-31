@@ -47,6 +47,9 @@ enum {
     RPC_CMD_MISSION_CLEAR_ALL = 0x8C,
     RPC_CMD_MISSION_SET_CURRENT = 0x8D,
     RPC_CMD_REQUEST_HOME_POSITION = 0x8E,
+    RPC_CMD_SET_SERVO             = 0x8F,
+    RPC_CMD_MOTOR_TEST            = 0x90,
+    RPC_CMD_CALIBRATE             = 0x91,
 };
 
 /* Telemetry message (Core 0 -> Core 1) */
@@ -192,5 +195,18 @@ typedef struct {
         struct {
             uint16_t seq;
         } mission_set_current_cmd;
+        struct {
+            uint8_t  servo_number;  /* 1-based servo number */
+            uint16_t pwm_value;     /* PWM in microseconds */
+        } servo_cmd;
+        struct {
+            uint8_t  motor_number;  /* 1-based motor number */
+            uint8_t  throttle_type; /* 0=percent, 1=PWM, 2=pilot */
+            float    throttle;      /* throttle value */
+            float    timeout_s;     /* duration in seconds */
+        } motor_test_cmd;
+        struct {
+            uint8_t  cal_type;      /* 1=gyro, 2=mag, 3=accel, 4=accel_level */
+        } calibrate_cmd;
     } data;
 } rpc_command_msg_t;
