@@ -1,0 +1,221 @@
+/*
+ * Thermal Camera — FLIR Lepton 3.5 via PureThermal USB UVC
+ *
+ * USB Host UVC driver receives 160x120 Y16 frames at ~9fps.
+ * Frames are double-buffered in PSRAM for thread-safe access.
+ */
+
+#include "thermal_camera.h"
+
+#include <string.h>
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_heap_caps.h"
+#include "usb/usb_host.h"
+#include "usb/uvc_host.h"
+
+static const char *TAG = "thermal_cam";
+
+/* Double buffer in PSRAM */
+static uint16_t *s_frame_buf = NULL;
+static SemaphoreHandle_t s_frame_mutex = NULL;
+static bool s_frame_valid = false;
+static bool s_active = false;
+
+/* User callback */
+static thermal_frame_cb_t s_user_cb = NULL;
+static void *s_user_ctx = NULL;
+
+/* UVC handles */
+static uvc_host_stream_handle_t s_stream = NULL;
+
+/* ------------------------------------------------------------------ */
+/* USB Host library event handler task                                 */
+/* ------------------------------------------------------------------ */
+
+static void usb_host_lib_task(void *param)
+{
+    while (1) {
+        uint32_t event_flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            /* All clients deregistered */
+        }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            /* All devices freed */
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* UVC frame callback                                                  */
+/* ------------------------------------------------------------------ */
+
+static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
+{
+    if (!frame || !frame->data) return true;
+
+    /* Validate frame size */
+    if (frame->data_len < THERMAL_FRAME_SIZE) {
+        return true;  /* Incomplete frame, skip */
+    }
+
+    /* Copy to double buffer under mutex */
+    if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        memcpy(s_frame_buf, frame->data, THERMAL_FRAME_SIZE);
+        s_frame_valid = true;
+        xSemaphoreGive(s_frame_mutex);
+    }
+
+    /* Notify user callback */
+    if (s_user_cb) {
+        s_user_cb((const uint16_t *)frame->data, frame->data_len, s_user_ctx);
+    }
+
+    return true;  /* Driver can reclaim frame buffer immediately */
+}
+
+/* ------------------------------------------------------------------ */
+/* UVC stream event callback                                           */
+/* ------------------------------------------------------------------ */
+
+static void uvc_stream_callback(const uvc_host_stream_event_data_t *event, void *user_ctx)
+{
+    switch (event->type) {
+    case UVC_HOST_TRANSFER_ERROR:
+        ESP_LOGW(TAG, "UVC transfer error");
+        break;
+    case UVC_HOST_DEVICE_DISCONNECTED:
+        ESP_LOGW(TAG, "PureThermal disconnected");
+        s_active = false;
+        break;
+    case UVC_HOST_FRAME_BUFFER_OVERFLOW:
+        ESP_LOGW(TAG, "Frame buffer overflow");
+        break;
+    default:
+        break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Public API                                                          */
+/* ------------------------------------------------------------------ */
+
+esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
+{
+    s_user_cb = frame_cb;
+    s_user_ctx = user_ctx;
+
+    /* Allocate frame buffer in PSRAM */
+    s_frame_buf = heap_caps_calloc(1, THERMAL_FRAME_SIZE, MALLOC_CAP_SPIRAM);
+    if (!s_frame_buf) {
+        ESP_LOGE(TAG, "Failed to allocate frame buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_frame_mutex = xSemaphoreCreateMutex();
+    if (!s_frame_mutex) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Install USB Host Library */
+    usb_host_config_t host_config = {
+        .intr_flags = ESP_INTR_FLAG_LEVEL1,
+    };
+    esp_err_t ret = usb_host_install(&host_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "USB host install failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* Start USB Host event handling task */
+    xTaskCreatePinnedToCore(usb_host_lib_task, "usb_host", 4096, NULL, 2, NULL, 1);
+
+    /* Install UVC driver */
+    uvc_host_driver_config_t uvc_config = {
+        .driver_task_stack_size = 4096,
+        .driver_task_priority = 5,
+        .create_background_task = true,
+    };
+    ret = uvc_host_install(&uvc_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "UVC host install failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* Open UVC stream — PureThermal Lepton 3.5 */
+    uvc_host_stream_config_t stream_config = {
+        .event_cb = uvc_stream_callback,
+        .frame_cb = uvc_frame_callback,
+        .user_ctx = NULL,
+        .usb = {
+            .vid = 0x1E4E,  /* GroupGets PureThermal VID */
+            .pid = 0x0100,  /* PureThermal PID */
+        },
+        .vs_format = {
+            .h_res = THERMAL_WIDTH,
+            .v_res = THERMAL_HEIGHT,
+            .fps = THERMAL_FPS,
+            .format = UVC_VS_FORMAT_UNCOMPRESSED,
+        },
+        .advanced = {
+            .number_of_frame_buffers = 3,
+            .frame_heap_caps = MALLOC_CAP_SPIRAM,
+            .number_of_urbs = 3,
+            .urb_size = 10 * 1024,
+        },
+    };
+
+    ESP_LOGI(TAG, "Waiting for PureThermal USB connection...");
+    ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "UVC stream open failed: %s (is PureThermal connected?)",
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    s_active = true;
+    ESP_LOGI(TAG, "PureThermal Lepton 3.5 connected (160x120 @ 9fps Y16)");
+    return ESP_OK;
+}
+
+esp_err_t thermal_camera_start(void)
+{
+    if (!s_stream) return ESP_ERR_INVALID_STATE;
+
+    esp_err_t ret = uvc_host_stream_start(s_stream);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Thermal streaming started");
+    }
+    return ret;
+}
+
+esp_err_t thermal_camera_stop(void)
+{
+    if (!s_stream) return ESP_ERR_INVALID_STATE;
+    s_active = false;
+    return uvc_host_stream_stop(s_stream);
+}
+
+bool thermal_camera_get_frame(uint16_t *buf)
+{
+    if (!s_frame_valid || !s_frame_mutex) return false;
+
+    if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (s_frame_valid) {
+            memcpy(buf, s_frame_buf, THERMAL_FRAME_SIZE);
+            xSemaphoreGive(s_frame_mutex);
+            return true;
+        }
+        xSemaphoreGive(s_frame_mutex);
+    }
+    return false;
+}
+
+bool thermal_camera_is_active(void)
+{
+    return s_active;
+}

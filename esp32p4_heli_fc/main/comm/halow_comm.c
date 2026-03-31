@@ -17,6 +17,7 @@
 #include "mm_app_common.h"
 #include "mm_app_loadconfig.h"
 #include "camera_h264.h"
+#include "thermal_camera.h"
 #include "../rpc/rpc_core.h"
 #include "gcs_bridge.h"
 #include "mavlink_handler.h"
@@ -101,6 +102,16 @@ static void halow_comm_task(void *param)
         if (server) {
             ESP_LOGI(TAG, "Camera streaming active");
         }
+    }
+
+    /* === Thermal Camera (PureThermal Lepton via USB) === */
+    ESP_LOGI(TAG, "Initializing thermal camera (USB UVC)...");
+    err = thermal_camera_init(NULL, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Thermal camera not available (connect PureThermal to USB OTG)");
+    } else {
+        thermal_camera_start();
+        ESP_LOGI(TAG, "Thermal camera streaming (160x120 @ 9fps)");
     }
 
     /* === Main Loop: keepalive + status === */
