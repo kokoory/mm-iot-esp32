@@ -268,21 +268,12 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         }
     }
 
-    /* Read negotiated format and set frame dimensions */
-    uvc_host_stream_format_t negotiated = {0};
-    if (uvc_host_stream_format_get(s_stream, &negotiated) == ESP_OK) {
-        s_width = negotiated.h_res;
-        s_height = negotiated.v_res;
-        s_frame_size = s_width * s_height * 2;  /* Y16 = 2 bytes/pixel */
-        ESP_LOGI(TAG, "Negotiated: %ux%u @ %.1f fps (format=%d, frame=%u bytes)",
-                 s_width, s_height, negotiated.fps, negotiated.format, (unsigned)s_frame_size);
-    } else {
-        /* Fallback */
-        s_width = 80;
-        s_height = 60;
-        s_frame_size = 80 * 60 * 2;
-        ESP_LOGW(TAG, "Could not read format, assuming 80x60");
-    }
+    /* Use requested resolution (uvc_host_stream_format_get is v2.3+ only) */
+    s_width = stream_config.vs_format.h_res;
+    s_height = stream_config.vs_format.v_res;
+    s_frame_size = s_width * s_height * 2;  /* Y16 = 2 bytes/pixel */
+    ESP_LOGI(TAG, "Opened: %ux%u (format=%d, frame=%u bytes)",
+             s_width, s_height, stream_config.vs_format.format, (unsigned)s_frame_size);
 
     /* Allocate frame buffer in PSRAM to match actual resolution */
     s_frame_buf = heap_caps_calloc(1, s_frame_size, MALLOC_CAP_SPIRAM);
