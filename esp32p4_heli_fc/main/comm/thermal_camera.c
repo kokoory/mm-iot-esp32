@@ -23,6 +23,12 @@
 
 static const char *TAG = "thermal_cam";
 
+/* UVC_VS_FORMAT_Y16 is added by tools/patch_uvc_y16.py.
+ * If the patch hasn't been applied yet, fall back to DEFAULT. */
+#ifndef UVC_VS_FORMAT_Y16
+#define UVC_VS_FORMAT_Y16 UVC_VS_FORMAT_DEFAULT
+#endif
+
 /* Negotiated resolution (set after stream open) */
 static unsigned s_width = 0;
 static unsigned s_height = 0;
