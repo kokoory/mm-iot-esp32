@@ -87,7 +87,7 @@ static const char *TAG = "camera_h264";
 #define STREAM_TARGET_FPS   10
 
 /* Set to 1 to enable MJPEG HTTP streaming (adds ~32ms latency per frame) */
-#define ENABLE_MJPEG        0
+#define ENABLE_MJPEG        1
 
 /* Double buffer for raw frames and encoded output */
 #define NUM_BUFS            2
@@ -635,29 +635,8 @@ esp_err_t camera_h264_init(void)
     ESP_LOGW(TAG, "Add espressif/esp_h264 to idf_component.yml");
 #endif
 
-    /* UDP RTP socket for H.264 streaming */
-    s_cam.rtp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s_cam.rtp_sock >= 0) {
-        /* Send to broadcast on RTP_PORT — any GCS on the network receives it */
-        memset(&s_cam.rtp_dest, 0, sizeof(s_cam.rtp_dest));
-        s_cam.rtp_dest.sin_family = AF_INET;
-        s_cam.rtp_dest.sin_port = htons(RTP_PORT);
-        s_cam.rtp_dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-
-        /* Enable broadcast */
-        int broadcast = 1;
-        setsockopt(s_cam.rtp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
-
-        /* Non-blocking so encode loop never stalls */
-        int flags = fcntl(s_cam.rtp_sock, F_GETFL, 0);
-        fcntl(s_cam.rtp_sock, F_SETFL, flags | O_NONBLOCK);
-
-        s_cam.rtp_seq = 0;
-        s_cam.rtp_timestamp = 0;
-        ESP_LOGI(TAG, "UDP RTP socket ready (broadcast port %d)", RTP_PORT);
-    } else {
-        ESP_LOGW(TAG, "Failed to create RTP socket");
-    }
+    /* RTP disabled — using on-demand MJPEG HTTP instead (saves bandwidth) */
+    s_cam.rtp_sock = -1;
 
     /* Start capture task */
     xTaskCreatePinnedToCore(camera_capture_task, "cam_task", 8192, NULL, 5,
@@ -702,8 +681,8 @@ static void camera_capture_task(void *arg)
         }
         last_encode_us = t1;
 
-        /* Skip encode/send when no clients are connected (save CPU + bandwidth) */
-        if (!s_cam.rtp_enabled && s_cam.mjpeg_clients <= 0) {
+        /* Skip encode/send when no MJPEG clients are connected (save CPU + bandwidth) */
+        if (s_cam.mjpeg_clients <= 0) {
             continue;
         }
 
@@ -780,10 +759,7 @@ static void camera_capture_task(void *arg)
                              (unsigned)out_frame.length,
                              (unsigned)(out_frame.length / RTP_MTU + 1));
                 }
-                /* Send via UDP RTP only when enabled (toggled via /rtp/on endpoint) */
-                if (s_cam.rtp_enabled) {
-                    rtp_send_h264_frame(s_cam.h264_buf, out_frame.length);
-                }
+                /* RTP disabled — H.264 data available for future use */
             }
         }
 #endif
@@ -1116,37 +1092,11 @@ static const httpd_uri_t uri_thermal_raw = {
     .handler = thermal_raw_handler,
 };
 
-static esp_err_t rtp_on_handler(httpd_req_t *req)
-{
-    s_cam.rtp_enabled = true;
-    httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_send(req, "RTP enabled", HTTPD_RESP_USE_STRLEN);
-}
-
-static esp_err_t rtp_off_handler(httpd_req_t *req)
-{
-    s_cam.rtp_enabled = false;
-    httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_send(req, "RTP disabled", HTTPD_RESP_USE_STRLEN);
-}
-
-static const httpd_uri_t uri_rtp_on = {
-    .uri = "/rtp/on",
-    .method = HTTP_GET,
-    .handler = rtp_on_handler,
-};
-
-static const httpd_uri_t uri_rtp_off = {
-    .uri = "/rtp/off",
-    .method = HTTP_GET,
-    .handler = rtp_off_handler,
-};
-
 httpd_handle_t camera_stream_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 10;
-    config.max_open_sockets = 4;  /* Limit HTTP sockets (UDP uses 3+) */
+    config.max_uri_handlers = 8;
+    config.max_open_sockets = 4;
     config.stack_size = 8192;
 
     httpd_handle_t server = NULL;
@@ -1156,11 +1106,8 @@ httpd_handle_t camera_stream_server_start(void)
         httpd_register_uri_handler(server, &uri_status);
         httpd_register_uri_handler(server, &uri_thermal);
         httpd_register_uri_handler(server, &uri_thermal_raw);
-        httpd_register_uri_handler(server, &uri_rtp_on);
-        httpd_register_uri_handler(server, &uri_rtp_off);
         ESP_LOGI(TAG, "HTTP server started (on-demand streaming)");
         ESP_LOGI(TAG, "  MJPEG:   http://<ip>/         (browser, on-demand)");
-        ESP_LOGI(TAG, "  H.264:   /rtp/on, /rtp/off    (RTP port %d)", RTP_PORT);
         ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal   (browser)");
         ESP_LOGI(TAG, "  Status:  http://<ip>/status");
     } else {
