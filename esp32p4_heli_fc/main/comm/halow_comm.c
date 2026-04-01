@@ -97,11 +97,12 @@ static void halow_comm_task(void *param)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(err));
         ESP_LOGW(TAG, "Continuing without camera");
-    } else {
-        httpd_handle_t server = camera_stream_server_start();
-        if (server) {
-            ESP_LOGI(TAG, "Camera streaming active");
-        }
+    }
+
+    /* Always start HTTP server (thermal viewer + status need it even without camera) */
+    httpd_handle_t server = camera_stream_server_start();
+    if (server) {
+        ESP_LOGI(TAG, "HTTP server active");
     }
 
     /* === Thermal Camera (PureThermal Lepton via USB) === */
