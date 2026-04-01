@@ -23,11 +23,9 @@
 
 static const char *TAG = "thermal_cam";
 
-/* UVC_VS_FORMAT_Y16 is added by tools/patch_uvc_y16.py.
- * If the patch hasn't been applied yet, fall back to 0 (device default). */
-#ifndef UVC_VS_FORMAT_Y16
-#define UVC_VS_FORMAT_Y16 0
-#endif
+/* UVC_VS_FORMAT_Y16 is added to the enum by tools/patch_uvc_y16.py.
+ * Redeclare here matching the patched enum value (after H265=4). */
+#define UVC_VS_FORMAT_Y16_VAL 5
 
 /* Negotiated resolution (set after stream open) */
 static unsigned s_width = 0;
@@ -38,6 +36,7 @@ static size_t s_frame_size = 0;
 static uint16_t *s_frame_buf = NULL;
 static SemaphoreHandle_t s_frame_mutex = NULL;
 static bool s_frame_valid = false;
+static volatile bool s_rtp_pending = false;
 static bool s_active = false;
 
 /* User callback */
@@ -143,20 +142,13 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
                  (unsigned long)s_frame_count, (unsigned)frame->data_len);
     }
 
-    /* Copy to double buffer under mutex */
-    if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    /* Copy to double buffer under mutex — keep callback fast to avoid overflow */
+    if (xSemaphoreTake(s_frame_mutex, 0) == pdTRUE) {
         size_t copy_len = (frame->data_len < s_frame_size) ? frame->data_len : s_frame_size;
         memcpy(s_frame_buf, frame->data, copy_len);
         s_frame_valid = true;
+        s_rtp_pending = true;
         xSemaphoreGive(s_frame_mutex);
-    }
-
-    /* Send via UDP RTP */
-    rtp_send_thermal_frame(frame->data, frame->data_len);
-
-    /* Notify user callback */
-    if (s_user_cb) {
-        s_user_cb((const uint16_t *)frame->data, frame->data_len, s_user_ctx);
     }
 
     return true;  /* Driver can reclaim frame buffer immediately */
@@ -242,7 +234,7 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
             .h_res = 160,   /* Lepton 3.5 native 160x120 */
             .v_res = 120,
             .fps = 9,       /* ~9fps for Lepton */
-            .format = UVC_VS_FORMAT_Y16,
+            .format = UVC_VS_FORMAT_Y16_VAL,
         },
         .advanced = {
             .number_of_frame_buffers = 3,
@@ -303,12 +295,35 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     return ESP_OK;
 }
 
+/* RTP sender task — runs on Core 1, sends buffered frames via UDP */
+static void thermal_rtp_task(void *param)
+{
+    uint8_t *rtp_buf = heap_caps_malloc(160 * 120 * 2, MALLOC_CAP_SPIRAM);
+    while (s_active) {
+        if (s_rtp_pending && rtp_buf) {
+            if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                memcpy(rtp_buf, s_frame_buf, s_frame_size);
+                s_rtp_pending = false;
+                xSemaphoreGive(s_frame_mutex);
+            }
+            rtp_send_thermal_frame(rtp_buf, s_frame_size);
+            if (s_user_cb) {
+                s_user_cb((const uint16_t *)rtp_buf, s_frame_size, s_user_ctx);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));  /* ~50Hz check, plenty for 9fps */
+    }
+    free(rtp_buf);
+    vTaskDelete(NULL);
+}
+
 esp_err_t thermal_camera_start(void)
 {
     if (!s_stream) return ESP_ERR_INVALID_STATE;
 
     esp_err_t ret = uvc_host_stream_start(s_stream);
     if (ret == ESP_OK) {
+        xTaskCreatePinnedToCore(thermal_rtp_task, "therm_rtp", 4096, NULL, 3, NULL, 1);
         ESP_LOGI(TAG, "Thermal streaming started");
     }
     return ret;
