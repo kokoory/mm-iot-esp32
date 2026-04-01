@@ -1,0 +1,233 @@
+/*
+ * ESP32-P4 Helicopter Flight Controller — System Schematic
+ * Board: Waveshare ESP32-P4-Module-DEV-KIT
+ * Project: esp32p4_heli_fc
+ *
+ * Generated from source code pin definitions.
+ * All GPIO numbers refer to ESP32-P4 GPIO matrix.
+ */
+
+/*
+ =============================================================================
+                        SYSTEM BLOCK DIAGRAM
+ =============================================================================
+
+                        +-------------------+
+                        |   RC Transmitter  |
+                        |    (2.4GHz RC)    |
+                        +--------+----------+
+                                 | SBUS (100kbps, 8E2, inverted)
+                                 v
+ +-----------+          +--------+----------+          +-----------+
+ |  GPS      |  UART1   |                   |  SPI3    | ISM330DHCX|
+ |  Module   +--------->+                   +--------->+ IMU 6-axis|
+ | (NMEA)    |  9600bps |                   |          | Accel+Gyro|
+ +-----------+          |                   |          +-----------+
+                        |                   |  SPI3    +-----------+
+                        |    ESP32-P4       +--------->+ LIS3MDL   |
+                        |    Dual RISC-V    |          | Magneto-  |
+                        |                   |          | meter     |
+ +-----------+  SPI2    |  Core 0: FC       |          +-----------+
+ | MMECH06   +<-------->+  Core 1: Comm     |
+ | HaLow     |          |                   |  MCPWM   +-----------+
+ | WiFi      |          |                   +--------->+ 3x CCPM   |
+ | Module    |          |                   |  50Hz    | Swashplate|
+ +-----------+          |                   |          | Servos    |
+                        |                   |  MCPWM   +-----------+
+ +-----------+  USB     |                   +--------->+ Tail ESC  |
+ |PureThermal+--------->+                   |  50Hz    +-----------+
+ | Lepton    |  UVC     |                   |  MCPWM   +-----------+
+ | 160x120   |  Y16     |                   +--------->+ Main Rotor|
+ +-----------+          |                   |  50Hz    | ESC       |
+                        |                   |          +-----------+
+ +-----------+  MIPI    |                   |
+ |  OV5647   +--------->+                   |  ADC     +-----------+
+ |  Camera   |  CSI-2   |                   +--------->+ Battery   |
+ |  800x640  |          |                   |          | Monitor   |
+ +-----------+  I2C     |                   |          | (11:1 div)|
+              +-------->+                   |          +-----------+
+              (SCCB)    |                   |
+                        |              GPIO +--------->  Status LED
+                        +-------------------+
+
+
+ =============================================================================
+                         DETAILED PIN CONNECTIONS
+ =============================================================================
+
+  ESP32-P4 GPIO                                External Device
+  ============                                 ===============
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    SPI2_HOST — HaLow Module (MMECH06)          │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO  2  ─── MISO ────────────────>  MMECH06 MISO             │
+  │  GPIO  3  ─── MOSI ────────────────>  MMECH06 MOSI             │
+  │  GPIO  4  ─── CS   ────────────────>  MMECH06 CS               │
+  │  GPIO  5  ─── SCLK ────────────────>  MMECH06 SCLK             │
+  │  GPIO 20  ─── RESET_N (active low) >  MMECH06 RESET            │
+  │  GPIO 21  ─── IRQ (input) ─────────<  MMECH06 IRQ              │
+  │  GPIO 23  ─── WAKE ────────────────>  MMECH06 WAKE             │
+  │  GPIO 32  ─── BUSY (input) ────────<  MMECH06 BUSY             │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    SPI3_HOST — IMU Sensors                     │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO 24  ─── SCLK ─────────────┬──>  ISM330DHCX SCLK         │
+  │                                  └──>  LIS3MDL SCLK            │
+  │  GPIO 25  ─── MOSI ─────────────┬──>  ISM330DHCX MOSI         │
+  │                                  └──>  LIS3MDL MOSI            │
+  │  GPIO 26  ─── MISO ─────────────┬──<  ISM330DHCX MISO         │
+  │                                  └──<  LIS3MDL MISO            │
+  │  GPIO 28  ─── CS_IMU ──────────────>  ISM330DHCX CS            │
+  │  GPIO 29  ─── CS_MAG ──────────────>  LIS3MDL CS               │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    I2C_NUM_0 — Camera SCCB                     │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO  7  ─── SDA ─────────────────>  OV5647 SCCB SDA         │
+  │  GPIO  8  ─── SCL ─────────────────>  OV5647 SCCB SCL         │
+  │                                       (100kHz, internal pull-up)│
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    MIPI CSI-2 — Camera Data                    │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  MIPI D0+/- ────────────────────────> OV5647 Data Lane 0      │
+  │  MIPI D1+/- ────────────────────────> OV5647 Data Lane 1      │
+  │  MIPI CLK+/- ───────────────────────> OV5647 Clock Lane       │
+  │  (Dedicated diff pairs, LDO3 2.5V for PHY)                    │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    USB OTG Host — Thermal Camera               │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  USB D+/D- ─────────────────────────> PureThermal Mini Pro     │
+  │  (UVC Y16 @ 160x120, VID=0x1E4E PID=0x0100)                   │
+  │  FLIR Lepton 3.5 radiometric, ~9fps                           │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    UART_NUM_1 — GPS                            │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO 33  ─── TX ──────────────────>  GPS Module RX            │
+  │  GPIO 27  ─── RX ──────────────────<  GPS Module TX            │
+  │  (9600 baud, 8N1, NMEA-0183)                                   │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    UART_NUM_2 — SBUS RC Input                  │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO 46  ─── RX (inverted) ───────<  RC Receiver SBUS Out    │
+  │  (100kbps, 8E2, Futaba SBUS protocol, 16ch + 2 digital)       │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │              MCPWM Group 0 — Swashplate Servos (120° CCPM)     │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO 47  ─── PWM CH0 ────────────>  Servo 1 (0°)    ─┐      │
+  │  GPIO 48  ─── PWM CH1 ────────────>  Servo 2 (120°)   ├ CCPM │
+  │  GPIO 49  ─── PWM CH2 ────────────>  Servo 3 (240°)  ─┘      │
+  │  (50Hz, 1000-2000µs, center=1500µs)                            │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │              MCPWM Group 1 — Tail & Main Rotor ESC             │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO 50  ─── PWM CH3 ────────────>  Tail Rotor ESC           │
+  │  GPIO 51  ─── PWM CH4 ────────────>  Main Rotor ESC           │
+  │  (50Hz, 1000-2000µs, safe=1000µs/off)                         │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    ADC — Battery Voltage                       │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO 52  ─── ADC ────────────────<  Voltage Divider          │
+  │                                      R1=100kΩ  ┬── VBATT+    │
+  │                                      R2=10kΩ   ┴── GND       │
+  │  (12-bit, DB_12 atten, ratio=11:1, IIR K=0.05)                │
+  │  Formula: Vbatt = (raw/4095) × 3.3 × 11.0                    │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    GPIO — Status LED                           │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  GPIO 31  ─── OUTPUT ─────────[R]──>  LED ──> GND             │
+  │  (Slow blink=disarmed, Fast blink=failsafe, Solid=armed)      │
+  └─────────────────────────────────────────────────────────────────┘
+
+
+ =============================================================================
+                     NETWORK & STREAMING TOPOLOGY
+ =============================================================================
+
+  ESP32-P4                    HaLow (802.11ah)              Ground Station
+  ─────────                   ─────────────────             ──────────────
+  ┌──────────┐   SPI2    ┌─────────┐   900MHz    ┌─────────────────────┐
+  │          ├───────────>│ MMECH06 ├─────────────>│ QGroundControl      │
+  │          │            │         │    WiFi      │  UDP :14550 MAVLink │
+  │ Core 1   │            └─────────┘              │  UDP :5600  H.264   │
+  │ (Comm)   │                                     │  UDP :5601  Thermal │
+  │          │  HTTP :80                           │  HTTP /thermal      │
+  │          ├─────────────────────────────────────>│  (browser viewer)   │
+  └──────────┘                                     └─────────────────────┘
+
+
+ =============================================================================
+                      POWER DISTRIBUTION
+ =============================================================================
+
+  LiPo Battery (3S/4S)
+       │
+       ├──── Voltage Divider (11:1) ──> GPIO 52 (ADC)
+       │
+       ├──── BEC 5V ──> RC Receiver
+       │                 GPS Module
+       │                 Servos (via BEC)
+       │
+       ├──── ESC ──> Main Rotor Motor
+       ├──── ESC ──> Tail Rotor Motor
+       │
+       └──── 5V USB ──> ESP32-P4 Dev Kit
+                        PureThermal (USB powered)
+
+
+ =============================================================================
+                     FULL GPIO PINOUT TABLE
+ =============================================================================
+
+  GPIO │ Function              │ Direction │ Interface  │ Device
+  ─────┼───────────────────────┼───────────┼────────────┼──────────────────
+    2  │ HaLow SPI MISO        │ Input     │ SPI2_HOST  │ MMECH06
+    3  │ HaLow SPI MOSI        │ Output    │ SPI2_HOST  │ MMECH06
+    4  │ HaLow SPI CS          │ Output    │ SPI2_HOST  │ MMECH06
+    5  │ HaLow SPI SCLK        │ Output    │ SPI2_HOST  │ MMECH06
+    7  │ Camera SCCB SDA       │ Bidir     │ I2C_NUM_0  │ OV5647
+    8  │ Camera SCCB SCL       │ Output    │ I2C_NUM_0  │ OV5647
+   20  │ HaLow Reset           │ Output    │ GPIO       │ MMECH06
+   21  │ HaLow IRQ             │ Input     │ GPIO       │ MMECH06
+   23  │ HaLow Wake            │ Output    │ GPIO       │ MMECH06
+   24  │ Sensor SPI SCLK       │ Output    │ SPI3_HOST  │ ISM330/LIS3MDL
+   25  │ Sensor SPI MOSI       │ Output    │ SPI3_HOST  │ ISM330/LIS3MDL
+   26  │ Sensor SPI MISO       │ Input     │ SPI3_HOST  │ ISM330/LIS3MDL
+   27  │ GPS UART RX           │ Input     │ UART1      │ GPS Module
+   28  │ IMU SPI CS            │ Output    │ SPI3_HOST  │ ISM330DHCX
+   29  │ Magnetometer SPI CS   │ Output    │ SPI3_HOST  │ LIS3MDL
+   31  │ Status LED            │ Output    │ GPIO       │ LED
+   32  │ HaLow Busy            │ Input     │ GPIO       │ MMECH06
+   33  │ GPS UART TX           │ Output    │ UART1      │ GPS Module
+   46  │ SBUS RX (inverted)    │ Input     │ UART2      │ RC Receiver
+   47  │ Swashplate Servo 1    │ Output    │ MCPWM G0   │ Servo (0°)
+   48  │ Swashplate Servo 2    │ Output    │ MCPWM G0   │ Servo (120°)
+   49  │ Swashplate Servo 3    │ Output    │ MCPWM G0   │ Servo (240°)
+   50  │ Tail Rotor ESC        │ Output    │ MCPWM G1   │ Tail ESC
+   51  │ Main Rotor ESC        │ Output    │ MCPWM G1   │ Main ESC
+   52  │ Battery ADC           │ Input     │ ADC        │ Voltage Divider
+  ─────┼───────────────────────┼───────────┼────────────┼──────────────────
+  MIPI │ Camera CSI-2 data     │ Input     │ MIPI CSI   │ OV5647
+  USB  │ Thermal camera UVC    │ Host      │ USB OTG    │ PureThermal
+
+  Total: 23 GPIO pins used + MIPI CSI + USB OTG
+*/
