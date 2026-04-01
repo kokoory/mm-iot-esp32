@@ -231,7 +231,6 @@ esp_err_t thermal_camera_start(void)
 
     esp_err_t ret = uvc_host_stream_start(s_stream);
     if (ret == ESP_OK) {
-        xTaskCreatePinnedToCore(thermal_rtp_task, "therm_rtp", 4096, NULL, 3, NULL, 1);
         ESP_LOGI(TAG, "Thermal streaming started");
     }
     return ret;
