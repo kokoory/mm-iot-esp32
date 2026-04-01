@@ -950,32 +950,27 @@ static const char THERMAL_HTML[] =
 "    }"
 "    const buf=await resp.arrayBuffer();"
 "    const raw=new Uint8Array(buf);"
-/* Y16 radiometric: 16-bit LE per pixel, values in centi-Kelvin (~27315 = 0C).
- * Fallback: YUY2 luminance at even byte offsets if values are all <256.
- * Same rendering as GetThermal: min-max normalize → 8-bit → iron colormap. */
+/* Compact format from server: 4-byte header (vmin_LE16, vmax_LE16) + npix bytes (8-bit normalized).
+ * ~19KB instead of 38KB raw Y16. Temperature calculated from vmin/vmax in header. */
 "    const npix=w*h;"
 "    let y=new Uint8Array(npix);"
 "    let isY16=false;"
-"    if(raw.length>=npix*2){"
-"      const u16=new Uint16Array(buf);"
-"      let hi=0;for(let i=0;i<Math.min(100,u16.length);i++)if(u16[i]>1000)hi++;"
-"      isY16=(hi>10);"
-"      if(isY16){"
-"        let vmin=65535,vmax=0;"
-"        for(let i=0;i<npix;i++){let v=u16[i];if(v<vmin)vmin=v;if(v>vmax)vmax=v;}"
-"        const rng=vmax>vmin?vmax-vmin:1;"
-"        for(let i=0;i<npix;i++)y[i]=((u16[i]-vmin)*255/rng+0.5)|0;"
-/* Spotmeter: center pixel temperature */
-"        const cx=(w>>1),cy=(h>>1);"
-"        const spot=u16[cy*w+cx];"
-"        const spotC=(spot/100-273.15).toFixed(1);"
-"        const tminC=(vmin/100-273.15).toFixed(1);"
-"        const tmaxC=(vmax/100-273.15).toFixed(1);"
-"        tempStr=' | '+tminC+'~'+tmaxC+'C  center:'+spotC+'C';"
-"      }else{"
-"        for(let i=0;i<npix;i++)y[i]=raw[i*2];"
-"        tempStr='';"
-"      }"
+"    if(raw.length===npix+4){"
+"      isY16=true;"
+"      const vmin=raw[0]|(raw[1]<<8);"
+"      const vmax=raw[2]|(raw[3]<<8);"
+"      for(let i=0;i<npix;i++)y[i]=raw[4+i];"
+"      const cx=(w>>1),cy=(h>>1);"
+"      const spotN=raw[4+cy*w+cx];"
+"      const rng=vmax>vmin?vmax-vmin:1;"
+"      const spotRaw=vmin+spotN*rng/255;"
+"      const spotC=(spotRaw/100-273.15).toFixed(1);"
+"      const tminC=(vmin/100-273.15).toFixed(1);"
+"      const tmaxC=(vmax/100-273.15).toFixed(1);"
+"      tempStr=' | '+tminC+'~'+tmaxC+'C  center:'+spotC+'C';"
+"    }else if(raw.length>=npix){"
+"      for(let i=0;i<npix;i++)y[i]=raw[i];"
+"      tempStr='';"
 "    }"
 "    const d=imgData.data;"
 "    for(let i=0;i<npix;i++){"
@@ -1021,6 +1016,7 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
     unsigned tw = thermal_camera_width();
     unsigned th = thermal_camera_height();
     size_t frame_sz = thermal_camera_frame_size();
+    unsigned npix = tw * th;
 
     uint16_t *y16_buf = heap_caps_malloc(frame_sz, MALLOC_CAP_SPIRAM);
     if (!y16_buf) {
@@ -1036,6 +1032,29 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
         return httpd_resp_send(req, NULL, 0);
     }
 
+    /* Compact format: 4-byte header (vmin_u16 LE, vmax_u16 LE) + npix bytes (8-bit normalized)
+     * Reduces 38KB Y16 → ~19KB, halving bandwidth for HaLow. */
+    uint16_t vmin = 65535, vmax = 0;
+    for (unsigned i = 0; i < npix; i++) {
+        if (y16_buf[i] < vmin) vmin = y16_buf[i];
+        if (y16_buf[i] > vmax) vmax = y16_buf[i];
+    }
+    uint16_t rng = (vmax > vmin) ? (vmax - vmin) : 1;
+
+    size_t out_sz = 4 + npix;
+    uint8_t *out = heap_caps_malloc(out_sz, MALLOC_CAP_SPIRAM);
+    if (!out) { free(y16_buf); return httpd_resp_send(req, NULL, 0); }
+
+    /* Header: vmin(LE16) + vmax(LE16) */
+    out[0] = vmin & 0xFF; out[1] = (vmin >> 8) & 0xFF;
+    out[2] = vmax & 0xFF; out[3] = (vmax >> 8) & 0xFF;
+
+    /* Normalize to 8-bit */
+    for (unsigned i = 0; i < npix; i++) {
+        out[4 + i] = (uint8_t)(((uint32_t)(y16_buf[i] - vmin) * 255) / rng);
+    }
+    free(y16_buf);
+
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(req, "Access-Control-Expose-Headers",
@@ -1047,8 +1066,8 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "X-Thermal-Width", w_str);
     httpd_resp_set_hdr(req, "X-Thermal-Height", h_str);
 
-    esp_err_t res = httpd_resp_send(req, (const char *)y16_buf, frame_sz);
-    free(y16_buf);
+    esp_err_t res = httpd_resp_send(req, (const char *)out, out_sz);
+    free(out);
     return res;
 }
 
