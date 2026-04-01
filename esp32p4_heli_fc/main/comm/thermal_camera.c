@@ -259,7 +259,7 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         /* Y16 not matched — retry with DEFAULT to accept any format */
         ESP_LOGW(TAG, "Y16 open failed (%s), retrying with DEFAULT format...",
                  esp_err_to_name(ret));
-        stream_config.vs_format.format = UVC_VS_FORMAT_DEFAULT;
+        stream_config.vs_format.format = 0;  /* device default */
         ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "UVC stream open failed: %s (is PureThermal connected?)",
