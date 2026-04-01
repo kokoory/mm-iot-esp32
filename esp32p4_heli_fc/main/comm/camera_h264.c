@@ -1082,6 +1082,7 @@ httpd_handle_t camera_stream_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 8;
+    config.max_open_sockets = 4;  /* Limit HTTP sockets (UDP uses 3+) */
     config.stack_size = 8192;
 
     httpd_handle_t server = NULL;
