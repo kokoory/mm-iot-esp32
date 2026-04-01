@@ -828,6 +828,12 @@ static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 
 static esp_err_t stream_handler(httpd_req_t *req)
 {
+    if (!s_cam.initialized) {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        return httpd_resp_send(req, "Camera not connected", HTTPD_RESP_USE_STRLEN);
+    }
+
     esp_err_t res;
     char part_buf[128];
 
