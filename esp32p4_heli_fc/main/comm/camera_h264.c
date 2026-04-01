@@ -950,26 +950,30 @@ static const char THERMAL_HTML[] =
 "    }"
 "    const buf=await resp.arrayBuffer();"
 "    const raw=new Uint8Array(buf);"
-/* Auto-detect format: Y16 has pixel count = buf.length/2,
- * YUY2 also has buf.length/2 pixels but Y values are 8-bit at even offsets.
- * Heuristic: if all uint16 values are < 256 range, it's likely YUY2 luminance */
+/* Y16 radiometric: 16-bit LE per pixel, values in centi-Kelvin (~27315 = 0C).
+ * Fallback: YUY2 luminance at even byte offsets if values are all <256.
+ * Same rendering as GetThermal: min-max normalize → 8-bit → iron colormap. */
 "    const npix=w*h;"
 "    let y=new Uint8Array(npix);"
 "    let isY16=false;"
 "    if(raw.length>=npix*2){"
 "      const u16=new Uint16Array(buf);"
 "      let hi=0;for(let i=0;i<Math.min(100,u16.length);i++)if(u16[i]>1000)hi++;"
-"      isY16=(hi>10);"  /* Y16 radiometric values are typically >20000 */
+"      isY16=(hi>10);"
 "      if(isY16){"
 "        let vmin=65535,vmax=0;"
-"        for(let i=0;i<npix;i++){if(u16[i]<vmin)vmin=u16[i];if(u16[i]>vmax)vmax=u16[i];}"
+"        for(let i=0;i<npix;i++){let v=u16[i];if(v<vmin)vmin=v;if(v>vmax)vmax=v;}"
 "        const rng=vmax>vmin?vmax-vmin:1;"
-"        for(let i=0;i<npix;i++)y[i]=Math.round((u16[i]-vmin)*255/rng);"
+"        for(let i=0;i<npix;i++)y[i]=((u16[i]-vmin)*255/rng+0.5)|0;"
+/* Spotmeter: center pixel temperature */
+"        const cx=(w>>1),cy=(h>>1);"
+"        const spot=u16[cy*w+cx];"
+"        const spotC=(spot/100-273.15).toFixed(1);"
 "        const tminC=(vmin/100-273.15).toFixed(1);"
 "        const tmaxC=(vmax/100-273.15).toFixed(1);"
-"        tempStr=' | '+tminC+'C ~ '+tmaxC+'C';"
+"        tempStr=' | '+tminC+'~'+tmaxC+'C  center:'+spotC+'C';"
 "      }else{"
-"        for(let i=0;i<npix;i++)y[i]=raw[i*2];"  /* YUY2: Y at even byte offsets */
+"        for(let i=0;i<npix;i++)y[i]=raw[i*2];"
 "        tempStr='';"
 "      }"
 "    }"
@@ -979,6 +983,13 @@ static const char THERMAL_HTML[] =
 "      d[i*4]=lut[idx*3];d[i*4+1]=lut[idx*3+1];d[i*4+2]=lut[idx*3+2];d[i*4+3]=255;"
 "    }"
 "    ctx.putImageData(imgData,0,0);"
+/* Draw center crosshair (spotmeter) */
+"    if(isY16){"
+"      ctx.strokeStyle='rgba(255,255,255,0.7)';ctx.lineWidth=1;"
+"      const cx=w/2,cy=h/2;"
+"      ctx.beginPath();ctx.moveTo(cx-4,cy);ctx.lineTo(cx+4,cy);"
+"      ctx.moveTo(cx,cy-4);ctx.lineTo(cx,cy+4);ctx.stroke();"
+"    }"
 "    frames++;"
 "    const now=performance.now();"
 "    if(now-lastT>=1000){"

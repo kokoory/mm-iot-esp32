@@ -21,3 +21,9 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(esp32p4_heli_fc)
+
+# Patch UVC driver to add Y16 format support for PureThermal thermal camera
+execute_process(
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/patch_uvc_y16.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)

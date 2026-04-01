@@ -220,8 +220,8 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     }
 
     /* Open UVC stream — PureThermal Lepton
-     * Use DEFAULT format to auto-negotiate; PureThermal advertises Y16
-     * which doesn't map to standard YUY2/MJPEG enum values.
+     * Request Y16 (16-bit grayscale) format explicitly for radiometric data.
+     * UVC_VS_FORMAT_Y16 is added by tools/patch_uvc_y16.py at build time.
      * Pre-allocate frame buffers for max possible size (160x120 Y16). */
     const size_t max_frame_size = 160 * 120 * 2;
     uvc_host_stream_config_t stream_config = {
@@ -236,7 +236,7 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
             .h_res = 160,   /* Lepton 3.5 native 160x120 */
             .v_res = 120,
             .fps = 9,       /* ~9fps for Lepton */
-            .format = UVC_VS_FORMAT_DEFAULT,
+            .format = UVC_VS_FORMAT_Y16,
         },
         .advanced = {
             .number_of_frame_buffers = 3,
@@ -247,12 +247,19 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         },
     };
 
-    ESP_LOGI(TAG, "Waiting for PureThermal USB connection...");
+    ESP_LOGI(TAG, "Waiting for PureThermal USB connection (Y16 160x120)...");
     ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "UVC stream open failed: %s (is PureThermal connected?)",
+        /* Y16 not matched — retry with DEFAULT to accept any format */
+        ESP_LOGW(TAG, "Y16 open failed (%s), retrying with DEFAULT format...",
                  esp_err_to_name(ret));
-        return ret;
+        stream_config.vs_format.format = UVC_VS_FORMAT_DEFAULT;
+        ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "UVC stream open failed: %s (is PureThermal connected?)",
+                     esp_err_to_name(ret));
+            return ret;
+        }
     }
 
     /* Read negotiated format and set frame dimensions */
