@@ -635,23 +635,20 @@ esp_err_t camera_h264_init(void)
     ESP_LOGW(TAG, "Add espressif/esp_h264 to idf_component.yml");
 #endif
 
-    /* UDP RTP socket for H.264 streaming */
+    /* UDP RTP socket for H.264 streaming (unicast to GCS) */
     s_cam.rtp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s_cam.rtp_sock >= 0) {
         memset(&s_cam.rtp_dest, 0, sizeof(s_cam.rtp_dest));
         s_cam.rtp_dest.sin_family = AF_INET;
         s_cam.rtp_dest.sin_port = htons(RTP_PORT);
-        s_cam.rtp_dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-
-        int broadcast = 1;
-        setsockopt(s_cam.rtp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+        inet_aton("192.168.0.209", &s_cam.rtp_dest.sin_addr);
 
         int flags = fcntl(s_cam.rtp_sock, F_GETFL, 0);
         fcntl(s_cam.rtp_sock, F_SETFL, flags | O_NONBLOCK);
 
         s_cam.rtp_seq = 0;
         s_cam.rtp_timestamp = 0;
-        ESP_LOGI(TAG, "UDP RTP socket ready (broadcast port %d, %d fps)", RTP_PORT, STREAM_TARGET_FPS);
+        ESP_LOGI(TAG, "UDP RTP socket ready (unicast 192.168.0.209:%d, %d fps)", RTP_PORT, STREAM_TARGET_FPS);
     } else {
         ESP_LOGW(TAG, "Failed to create RTP socket");
     }
