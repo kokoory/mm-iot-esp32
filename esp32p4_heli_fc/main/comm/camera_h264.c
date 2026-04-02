@@ -84,7 +84,7 @@ static const char *TAG = "camera_h264";
 #define RTP_CLOCK_RATE      90000        /* 90kHz for video */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
-#define STREAM_TARGET_FPS   10
+#define STREAM_TARGET_FPS   5
 
 /* Set to 1 to enable MJPEG HTTP streaming (requires YUV422 ISP output — conflicts with H.264 YUV420) */
 #define ENABLE_MJPEG        0
@@ -683,21 +683,13 @@ static void camera_capture_task(void *arg)
     int64_t stat_wait_us = 0, stat_h264_us = 0;
     size_t stat_h264_bytes = 0;
 
-    uint32_t timeout_count = 0;
-
     while (1) {
         int64_t t0 = esp_timer_get_time();
 
         if (xSemaphoreTake(s_cam.frame_captured, pdMS_TO_TICKS(2000)) != pdTRUE) {
-            timeout_count++;
-            if (timeout_count == 1 || timeout_count == 5) {
-                ESP_LOGW(TAG, "Frame capture timeout - check camera ribbon cable (%lu)", (unsigned long)timeout_count);
-            } else if (timeout_count % 30 == 0) {
-                ESP_LOGW(TAG, "Still no camera frames (%lu timeouts)", (unsigned long)timeout_count);
-            }
+            ESP_LOGW(TAG, "Frame capture timeout - check camera ribbon cable");
             continue;
         }
-        timeout_count = 0;
 
         int64_t t1 = esp_timer_get_time();
 
@@ -912,10 +904,7 @@ static const char THERMAL_HTML[] =
 "let imgData=null,w=0,h=0;"
 "async function poll(){"
 "  try{"
-"    const ac=new AbortController();"
-"    const tid=setTimeout(()=>ac.abort(),3000);"
-"    const resp=await fetch('/thermal/raw',{signal:ac.signal});"
-"    clearTimeout(tid);"
+"    const resp=await fetch('/thermal/raw');"
 "    if(resp.status===204||!resp.ok){"
 "      errCnt++;pollMs=resp.status===204?1000:Math.min(5000,111*Math.pow(2,errCnt));"
 "      info.textContent=resp.status===204?'Waiting for thermal camera...':'Error '+resp.status;return;"
