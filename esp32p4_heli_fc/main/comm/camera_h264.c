@@ -349,6 +349,7 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
         if (ret > 0) { s_cam.rtp_pkts_sent++; s_cam.rtp_bytes_sent += ret; }
         else { s_cam.rtp_pkts_dropped++; }
         s_cam.rtp_seq++;
+        vTaskDelay(pdMS_TO_TICKS(2));  /* Pacing: let HaLow TX queue drain */
     } else {
         /* FU-A fragmentation */
         uint8_t nal_header = nalu[0];
@@ -393,11 +394,8 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
             remaining -= chunk;
             first = false;
 
-            /* Pacing: 1ms delay between fragments to prevent lwIP queue overflow
-             * (I-frames can generate 50+ fragments that would otherwise burst) */
-            if (remaining > 0) {
-                vTaskDelay(1);
-            }
+            /* Pacing: let HaLow TX queue drain between fragments */
+            vTaskDelay(pdMS_TO_TICKS(2));
         }
     }
 }
