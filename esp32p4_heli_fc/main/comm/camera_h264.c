@@ -316,6 +316,23 @@ static esp_err_t sensor_init(void)
 
 /* ========== RTP H.264 over UDP ========== */
 
+/* Send one RTP packet with retry on TX pool full (ENOMEM) */
+static bool rtp_sendto(const uint8_t *pkt, size_t pkt_len)
+{
+    for (int attempt = 0; attempt < 3; attempt++) {
+        int ret = sendto(s_cam.rtp_sock, pkt, pkt_len, 0,
+                         (struct sockaddr *)&s_cam.rtp_dest, sizeof(s_cam.rtp_dest));
+        if (ret > 0) {
+            s_cam.rtp_pkts_sent++;
+            s_cam.rtp_bytes_sent += ret;
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));  /* Wait for TX pool to drain */
+    }
+    s_cam.rtp_pkts_dropped++;
+    return false;
+}
+
 /*
  * Send one H.264 NAL unit via RTP.
  * If NAL fits in one packet (≤ RTP_MTU): single NAL unit packet.
@@ -344,10 +361,7 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
         pkt[11] = RTP_SSRC & 0xFF;
 
         memcpy(pkt + RTP_HEADER_SIZE, nalu, len);
-        int ret = sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + len, 0,
-               (struct sockaddr *)&s_cam.rtp_dest, sizeof(s_cam.rtp_dest));
-        if (ret > 0) { s_cam.rtp_pkts_sent++; s_cam.rtp_bytes_sent += ret; }
-        else { s_cam.rtp_pkts_dropped++; }
+        rtp_sendto(pkt, RTP_HEADER_SIZE + len);
         s_cam.rtp_seq++;
         vTaskDelay(pdMS_TO_TICKS(8));  /* Pacing: let HaLow TX queue drain */
     } else {
@@ -384,10 +398,7 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
                                         (last_frag ? 0x40 : 0x00) | nal_type;
 
             memcpy(pkt + RTP_HEADER_SIZE + 2, payload, chunk);
-            int ret = sendto(s_cam.rtp_sock, pkt, RTP_HEADER_SIZE + 2 + chunk, 0,
-                   (struct sockaddr *)&s_cam.rtp_dest, sizeof(s_cam.rtp_dest));
-            if (ret > 0) { s_cam.rtp_pkts_sent++; s_cam.rtp_bytes_sent += ret; }
-            else { s_cam.rtp_pkts_dropped++; }
+            rtp_sendto(pkt, RTP_HEADER_SIZE + 2 + chunk);
 
             s_cam.rtp_seq++;
             payload += chunk;
