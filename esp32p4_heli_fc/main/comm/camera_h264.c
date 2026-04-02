@@ -86,8 +86,8 @@ static const char *TAG = "camera_h264";
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
 #define STREAM_TARGET_FPS   10
 
-/* Set to 1 to enable MJPEG HTTP streaming (adds ~32ms latency per frame) */
-#define ENABLE_MJPEG        1
+/* Set to 1 to enable MJPEG HTTP streaming (requires YUV422 ISP output — conflicts with H.264 YUV420) */
+#define ENABLE_MJPEG        0
 
 /* Double buffer for raw frames and encoded output */
 #define NUM_BUFS            2
@@ -681,10 +681,7 @@ static void camera_capture_task(void *arg)
         }
         last_encode_us = t1;
 
-        /* Skip encode/send when no MJPEG clients are connected (save CPU + bandwidth) */
-        if (s_cam.mjpeg_clients <= 0) {
-            continue;
-        }
+        /* H.264 encode runs continuously (no MJPEG, no RTP — data for future use) */
 
         int buf_idx = s_cam.captured_buf_idx;
         uint8_t *frame_data = s_cam.raw_buf[buf_idx];
@@ -815,54 +812,15 @@ static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 
 static esp_err_t stream_handler(httpd_req_t *req)
 {
-    if (!s_cam.initialized) {
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-        return httpd_resp_send(req, "Camera not connected", HTTPD_RESP_USE_STRLEN);
-    }
-
-    esp_err_t res;
-    char part_buf[128];
-
-    res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
-    if (res != ESP_OK) return res;
+    /* MJPEG disabled (ISP outputs YUV420, HW JPEG encoder only accepts YUV422) */
+    httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-
-    s_cam.mjpeg_clients++;
-    ESP_LOGI(TAG, "MJPEG stream client connected (%d active)", s_cam.mjpeg_clients);
-
-    while (true) {
-        if (xSemaphoreTake(s_cam.frame_ready, pdMS_TO_TICKS(5000)) != pdTRUE) {
-            ESP_LOGW(TAG, "Stream: no frame available (timeout)");
-            continue;
-        }
-
-        if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            int rd_idx = s_cam.jpeg_read_idx;
-            size_t jpg_size = s_cam.jpeg_size[rd_idx];
-
-            if (jpg_size > 0) {
-                res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
-                if (res == ESP_OK) {
-                    size_t hlen = snprintf(part_buf, sizeof(part_buf),
-                        "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
-                        (unsigned)jpg_size);
-                    res = httpd_resp_send_chunk(req, part_buf, hlen);
-                }
-                if (res == ESP_OK) {
-                    res = httpd_resp_send_chunk(req,
-                        (const char *)s_cam.jpeg_buf[rd_idx], jpg_size);
-                }
-            }
-            xSemaphoreGive(s_cam.jpeg_mutex);
-        }
-
-        if (res != ESP_OK) break;
-    }
-
-    s_cam.mjpeg_clients--;
-    ESP_LOGI(TAG, "MJPEG stream client disconnected (%d active)", s_cam.mjpeg_clients);
-    return res;
+    return httpd_resp_send(req,
+        "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:40px'>"
+        "<h2>ESP32-P4 Helicopter</h2>"
+        "<p><a href='/thermal' style='color:#0af;font-size:20px'>Thermal Camera</a></p>"
+        "<p><a href='/status' style='color:#0af;font-size:20px'>System Status</a></p>"
+        "</body></html>", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t status_handler(httpd_req_t *req)
