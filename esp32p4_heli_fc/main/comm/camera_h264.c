@@ -700,8 +700,8 @@ static void camera_capture_task(void *arg)
             size_t jpg_size_out = 0;
             int wr_idx = s_cam.jpeg_write_idx;
             jpeg_encode_cfg_t jpeg_cfg = {
-                .src_type = JPEG_ENCODE_IN_FORMAT_YUV420,
-                .sub_sample = JPEG_DOWN_SAMPLING_YUV420,
+                .src_type = JPEG_ENCODE_IN_FORMAT_YUV422,
+                .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
                 .image_quality = JPEG_QUALITY,
                 .width = CAM_WIDTH,
                 .height = CAM_HEIGHT,
