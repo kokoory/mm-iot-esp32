@@ -683,13 +683,21 @@ static void camera_capture_task(void *arg)
     int64_t stat_wait_us = 0, stat_h264_us = 0;
     size_t stat_h264_bytes = 0;
 
+    uint32_t timeout_count = 0;
+
     while (1) {
         int64_t t0 = esp_timer_get_time();
 
         if (xSemaphoreTake(s_cam.frame_captured, pdMS_TO_TICKS(2000)) != pdTRUE) {
-            ESP_LOGW(TAG, "Frame capture timeout - check camera ribbon cable");
+            timeout_count++;
+            if (timeout_count == 1 || timeout_count == 5) {
+                ESP_LOGW(TAG, "Frame capture timeout - check camera ribbon cable (%lu)", (unsigned long)timeout_count);
+            } else if (timeout_count % 30 == 0) {
+                ESP_LOGW(TAG, "Still no camera frames (%lu timeouts)", (unsigned long)timeout_count);
+            }
             continue;
         }
+        timeout_count = 0;
 
         int64_t t1 = esp_timer_get_time();
 
