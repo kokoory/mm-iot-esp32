@@ -70,9 +70,9 @@ static const char *TAG = "camera_h264";
 /* H.264 encoder settings */
 #define H264_GOP            60           /* I-frame every 60 frames (~12s at 5fps) */
 #define H264_FPS            5            /* Encode at 5fps for HaLow bandwidth */
-#define H264_QP_MIN         30
-#define H264_QP_MAX         45           /* Aggressive compression to prevent bursts */
-#define H264_BITRATE        300000       /* 300 Kbps target for HaLow (640x480) */
+#define H264_QP_MIN         32
+#define H264_QP_MAX         48           /* Aggressive compression for HaLow */
+#define H264_BITRATE        150000       /* 150 Kbps target (MCS2/2MHz ~400Kbps usable) */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
 /* UDP RTP streaming for H.264 */
@@ -349,7 +349,7 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
         if (ret > 0) { s_cam.rtp_pkts_sent++; s_cam.rtp_bytes_sent += ret; }
         else { s_cam.rtp_pkts_dropped++; }
         s_cam.rtp_seq++;
-        vTaskDelay(pdMS_TO_TICKS(2));  /* Pacing: let HaLow TX queue drain */
+        vTaskDelay(pdMS_TO_TICKS(8));  /* Pacing: let HaLow TX queue drain */
     } else {
         /* FU-A fragmentation */
         uint8_t nal_header = nalu[0];
@@ -395,7 +395,7 @@ static void rtp_send_h264_nalu(const uint8_t *nalu, size_t len, bool last_nalu)
             first = false;
 
             /* Pacing: let HaLow TX queue drain between fragments */
-            vTaskDelay(pdMS_TO_TICKS(2));
+            vTaskDelay(pdMS_TO_TICKS(8));
         }
     }
 }
@@ -1063,6 +1063,30 @@ static const httpd_uri_t uri_thermal_raw = {
     .handler = thermal_raw_handler,
 };
 
+/* SDP file for VLC/ffplay to receive H.264 RTP stream */
+static const char STREAM_SDP[] =
+    "v=0\r\n"
+    "o=- 0 0 IN IP4 0.0.0.0\r\n"
+    "s=ESP32-P4 H.264\r\n"
+    "c=IN IP4 0.0.0.0\r\n"
+    "t=0 0\r\n"
+    "m=video 5600 RTP/AVP 96\r\n"
+    "a=rtpmap:96 H264/90000\r\n"
+    "a=fmtp:96 packetization-mode=1\r\n";
+
+static esp_err_t sdp_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/sdp");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"stream.sdp\"");
+    return httpd_resp_send(req, STREAM_SDP, strlen(STREAM_SDP));
+}
+
+static const httpd_uri_t uri_sdp = {
+    .uri = "/stream.sdp",
+    .method = HTTP_GET,
+    .handler = sdp_handler,
+};
+
 httpd_handle_t camera_stream_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -1077,9 +1101,10 @@ httpd_handle_t camera_stream_server_start(void)
         httpd_register_uri_handler(server, &uri_status);
         httpd_register_uri_handler(server, &uri_thermal);
         httpd_register_uri_handler(server, &uri_thermal_raw);
+        httpd_register_uri_handler(server, &uri_sdp);
         ESP_LOGI(TAG, "HTTP server started");
-        ESP_LOGI(TAG, "  H.264:   rtp://@:%d  (VLC/QGC, %d fps)", RTP_PORT, STREAM_TARGET_FPS);
-        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser)");
+        ESP_LOGI(TAG, "  H.264:   http://<ip>/stream.sdp  (open in VLC, %d fps)", STREAM_TARGET_FPS);
+        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal      (browser)");
         ESP_LOGI(TAG, "  Status:  http://<ip>/status");
     } else {
         ESP_LOGE(TAG, "Failed to start HTTP server");
