@@ -643,9 +643,11 @@ esp_err_t camera_h264_init(void)
         s_cam.rtp_dest.sin_port = htons(RTP_PORT);
         inet_aton("192.168.0.209", &s_cam.rtp_dest.sin_addr);
 
-        int flags = fcntl(s_cam.rtp_sock, F_GETFL, 0);
-        fcntl(s_cam.rtp_sock, F_SETFL, flags | O_NONBLOCK);
+        /* Increase UDP send buffer to avoid drops on burst (I-frames) */
+        int sndbuf = 32 * 1024;
+        setsockopt(s_cam.rtp_sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
+        /* Blocking send — frame is small enough at 5fps, won't stall long */
         s_cam.rtp_seq = 0;
         s_cam.rtp_timestamp = 0;
         ESP_LOGI(TAG, "UDP RTP socket ready (unicast 192.168.0.209:%d, %d fps)", RTP_PORT, STREAM_TARGET_FPS);
