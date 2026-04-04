@@ -740,7 +740,8 @@ static void camera_capture_task(void *arg)
                 h264_size_out = out_frame.length;
 
                 /* Sync cache: H.264 encoder wrote to PSRAM, CPU needs to read */
-                esp_cache_msync(s_cam.h264_buf, out_frame.length,
+                esp_cache_msync(s_cam.h264_buf,
+                                (out_frame.length + 63) & ~63,
                                 ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
                 /* 1. Send via UDP RTP (Primary, Low Latency) */
