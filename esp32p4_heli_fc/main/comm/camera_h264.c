@@ -33,7 +33,6 @@
 
 #include "camera_h264.h"
 #include "thermal_camera.h"
-#include "gcs_bridge.h"
 #include "../common/i2c_sync.h"
 
 static const char *TAG = "camera_h264";
@@ -219,15 +218,6 @@ static void rtp_header_serialize(uint8_t *buf, uint16_t seq, uint32_t ts, uint32
 static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
 {
     if (s_cam.rtp_sock < 0) return;
-
-    /* Check/Update GCS IP from gcs_bridge if it's currently broadcast */
-    if (s_cam.rtp_dest_addr.sin_addr.s_addr == htonl(INADDR_BROADCAST)) {
-        uint32_t gcs_ip = gcs_bridge_get_ip();
-        if (gcs_ip != htonl(INADDR_BROADCAST)) {
-            s_cam.rtp_dest_addr.sin_addr.s_addr = gcs_ip;
-            ESP_LOGI(TAG, "RTP destination updated to GCS IP: %s", inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
-        }
-    }
 
     uint8_t pkt[RTP_PKT_MAX_SIZE + RTP_HEADER_SIZE + 2];
     rtp_header_serialize(pkt, s_cam.rtp_seq++, s_cam.rtp_ts, s_cam.rtp_ssrc, marker);
