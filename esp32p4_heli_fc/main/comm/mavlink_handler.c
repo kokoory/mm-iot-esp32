@@ -308,16 +308,36 @@ static bool rate_check(uint32_t *last_ms, uint8_t hz)
     return false;
 }
 
+/* TX rate limiter: cap outbound packets to avoid saturating HaLow TX pool */
+#define TX_BUDGET_MAX_PER_SEC  30   /* max MAVLink packets per second */
+#define TX_BUDGET_WINDOW_MS   1000
+static uint32_t s_tx_budget_count = 0;
+static uint32_t s_tx_budget_window_start = 0;
+
 /* Forward declarations */
 static void send_mission_current(void);
 static void send_autopilot_version(void);
 
 static void send_mavlink_msg(mavlink_message_t *msg)
 {
+    uint32_t now = get_time_ms();
+
+    /* Reset budget window every second */
+    if ((now - s_tx_budget_window_start) >= TX_BUDGET_WINDOW_MS) {
+        s_tx_budget_count = 0;
+        s_tx_budget_window_start = now;
+    }
+
+    /* Drop non-critical telemetry when budget exhausted (always allow heartbeat) */
+    if (s_tx_budget_count >= TX_BUDGET_MAX_PER_SEC && msg->msgid != 0 /* HEARTBEAT */) {
+        return;
+    }
+
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     int len = mavlink_serialize(msg, buf, sizeof(buf));
     if (len > 0) {
         gcs_bridge_send(buf, (size_t)len);
+        s_tx_budget_count++;
     }
 }
 
@@ -671,7 +691,7 @@ static void send_vfr_hud(void)
 
 static void send_servo_output(void)
 {
-    if (!s_has_servo || !rate_check(&s_last_servo_ms, 4)) { /* 4 Hz */
+    if (!s_has_servo || !rate_check(&s_last_servo_ms, 2)) { /* 2 Hz */
         return;
     }
 
@@ -822,7 +842,7 @@ static void send_estimator_status(void)
 
 static void send_highres_imu(void)
 {
-    if (!s_has_imu_raw || !rate_check(&s_last_highres_ms, 10)) { /* 10 Hz */
+    if (!s_has_imu_raw || !rate_check(&s_last_highres_ms, 4)) { /* 4 Hz */
         return;
     }
 
@@ -1793,6 +1813,10 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     s_last_estimator_ms  = now;
     s_last_vibration_ms  = now;
     s_last_highres_ms    = now;
+
+    /* TX budget limiter */
+    s_tx_budget_count = 0;
+    s_tx_budget_window_start = now;
 
     ESP_LOGI(TAG, "PX4-compat MAVLink handler initialized (HB=%dHz ATT=%dHz GPS=%dHz BAT=%dHz)",
              s_config.heartbeat_hz, s_config.attitude_hz,

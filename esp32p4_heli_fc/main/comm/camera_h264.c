@@ -225,8 +225,13 @@ static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
     rtp_header_serialize(pkt, s_cam.rtp_seq++, s_cam.rtp_ts, s_cam.rtp_ssrc, marker);
     memcpy(pkt + RTP_HEADER_SIZE, data, len);
 
-    sendto(s_cam.rtp_sock, pkt, len + RTP_HEADER_SIZE, 0,
-           (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
+    int ret = sendto(s_cam.rtp_sock, pkt, len + RTP_HEADER_SIZE, 0,
+                     (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
+    if (ret < 0 && (errno == ENOMEM || errno == EAGAIN || errno == EWOULDBLOCK)) {
+        /* TX pool full — back off longer to let it drain */
+        vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
 
     /* Pacing: delay between packets to prevent Morse Micro TX queue overflow */
     vTaskDelay(pdMS_TO_TICKS(RTP_PACING_MS));

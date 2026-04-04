@@ -68,9 +68,9 @@ static void halow_comm_task(void *param)
 
     mavlink_handler_config_t mav_config = {
         .heartbeat_hz  = 1,
-        .attitude_hz   = 10,
-        .gps_hz        = 5,
-        .battery_hz    = 2,
+        .attitude_hz   = 4,
+        .gps_hz        = 2,
+        .battery_hz    = 1,
         .vfr_hud_hz    = 2,
     };
     mavlink_handler_init(rpc, &mav_config);
