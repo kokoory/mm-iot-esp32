@@ -34,6 +34,7 @@
 #include "camera_h264.h"
 #include "thermal_camera.h"
 #include "gcs_bridge.h"
+#include "mm_app_common.h"
 #include "../common/i2c_sync.h"
 
 static const char *TAG = "camera_h264";
@@ -183,6 +184,12 @@ static struct {
     uint32_t rtp_ts;
     uint32_t rtp_ssrc;
 
+    /* RTP diagnostics */
+    uint32_t rtp_pkts_sent;
+    uint32_t rtp_pkts_dropped;
+    uint32_t rtp_frames_sent;
+    uint32_t rtp_backoff_count;
+
 #if HAS_CAMERA_PIPELINE
     esp_cam_ctlr_handle_t cam_handle;
 #endif
@@ -221,17 +228,30 @@ static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
 {
     if (s_cam.rtp_sock < 0) return;
 
+    /* Check HaLow TX flow control — skip if pool is saturated */
+    if (app_wlan_tx_is_paused()) {
+        s_cam.rtp_pkts_dropped++;
+        s_cam.rtp_backoff_count++;
+        vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
+
     uint8_t pkt[RTP_PKT_MAX_SIZE + RTP_HEADER_SIZE + 2];
     rtp_header_serialize(pkt, s_cam.rtp_seq++, s_cam.rtp_ts, s_cam.rtp_ssrc, marker);
     memcpy(pkt + RTP_HEADER_SIZE, data, len);
 
     int ret = sendto(s_cam.rtp_sock, pkt, len + RTP_HEADER_SIZE, 0,
                      (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
-    if (ret < 0 && (errno == ENOMEM || errno == EAGAIN || errno == EWOULDBLOCK)) {
-        /* TX pool full — back off longer to let it drain */
-        vTaskDelay(pdMS_TO_TICKS(20));
+    if (ret < 0) {
+        s_cam.rtp_pkts_dropped++;
+        if (errno == ENOMEM || errno == EAGAIN || errno == EWOULDBLOCK) {
+            s_cam.rtp_backoff_count++;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
         return;
     }
+
+    s_cam.rtp_pkts_sent++;
 
     /* Pacing: delay between packets to prevent Morse Micro TX queue overflow */
     vTaskDelay(pdMS_TO_TICKS(RTP_PACING_MS));
@@ -248,6 +268,8 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
         ESP_LOGI(TAG, "RTP destination updated to GCS: %s",
                  inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
     }
+
+    s_cam.rtp_frames_sent++;
 
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
@@ -789,7 +811,7 @@ static void camera_capture_task(void *arg)
 
         if ((now - last_log_us) > 5000000) {
             if (stat_frames > 0) {
-                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms h264=%ldms total=%ldms | h264=%luKB | clients=%d",
+                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms h264=%ldms total=%ldms | h264=%luKB | http=%d",
                          (long)stat_frames,
                          (long)(stat_wait_us / stat_frames / 1000),
                          (long)(stat_h264_us / stat_frames / 1000),
@@ -797,6 +819,14 @@ static void camera_capture_task(void *arg)
                          (unsigned long)(stat_h264_bytes / 1024),
                          s_cam.h264_clients);
             }
+            ESP_LOGI(TAG, "[rtp] sent=%lu drop=%lu frames=%lu backoff=%lu | tx_paused=%s pause_cnt=%lu | dest=%s",
+                     (unsigned long)s_cam.rtp_pkts_sent,
+                     (unsigned long)s_cam.rtp_pkts_dropped,
+                     (unsigned long)s_cam.rtp_frames_sent,
+                     (unsigned long)s_cam.rtp_backoff_count,
+                     app_wlan_tx_is_paused() ? "YES" : "no",
+                     (unsigned long)app_wlan_tx_pause_count(),
+                     inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
             stat_frames = 0;
             stat_wait_us = stat_h264_us = 0;
             stat_h264_bytes = 0;
@@ -835,13 +865,16 @@ static esp_err_t stream_handler(httpd_req_t *req)
 
 static esp_err_t status_handler(httpd_req_t *req)
 {
-    char buf[512];
+    char buf[768];
     snprintf(buf, sizeof(buf),
         "{\"initialized\":%s,\"resolution\":\"%dx%d\",\"fps\":%.1f,"
         "\"jpeg_encoder\":\"%s\",\"h264_encoder\":\"%s\","
         "\"h264_transport\":\"udp_rtp+http_tcp\",\"h264_port\":%d,"
+        "\"rtp_dest\":\"%s\","
+        "\"rtp_pkts_sent\":%lu,\"rtp_pkts_dropped\":%lu,"
+        "\"rtp_frames\":%lu,\"rtp_backoffs\":%lu,"
+        "\"tx_paused\":%s,\"tx_pause_count\":%lu,"
         "\"pipeline\":\"csi_isp\","
-        "\"endpoints\":[\"/\",\"/status\"],"
         "\"vlc\":\"rtp://@:%d\"}",
         s_cam.initialized ? "true" : "false",
         CAM_WIDTH, CAM_HEIGHT, s_cam.fps,
@@ -855,7 +888,15 @@ static esp_err_t status_handler(httpd_req_t *req)
 #else
         "none",
 #endif
-        RTP_PORT, RTP_PORT);
+        RTP_PORT,
+        inet_ntoa(s_cam.rtp_dest_addr.sin_addr),
+        (unsigned long)s_cam.rtp_pkts_sent,
+        (unsigned long)s_cam.rtp_pkts_dropped,
+        (unsigned long)s_cam.rtp_frames_sent,
+        (unsigned long)s_cam.rtp_backoff_count,
+        app_wlan_tx_is_paused() ? "true" : "false",
+        (unsigned long)app_wlan_tx_pause_count(),
+        RTP_PORT);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");

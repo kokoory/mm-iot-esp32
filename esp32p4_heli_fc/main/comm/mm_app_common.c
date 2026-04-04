@@ -25,6 +25,31 @@ static uint32_t ip_addr_u32 = 0;
 static uint32_t gw_addr_u32 = 0;
 uint8_t mac_addr[MMWLAN_MAC_ADDR_LEN];
 
+/* TX flow control monitoring */
+static volatile bool s_tx_paused = false;
+static volatile uint32_t s_tx_pause_count = 0;
+
+static void tx_flow_control_cb(enum mmwlan_tx_flow_control_state state, void *arg)
+{
+    (void)arg;
+    if (state == MMWLAN_TX_PAUSED) {
+        s_tx_paused = true;
+        s_tx_pause_count++;
+    } else {
+        s_tx_paused = false;
+    }
+}
+
+bool app_wlan_tx_is_paused(void)
+{
+    return s_tx_paused;
+}
+
+uint32_t app_wlan_tx_pause_count(void)
+{
+    return s_tx_pause_count;
+}
+
 static void sta_status_callback(enum mmwlan_sta_state sta_state)
 {
     switch (sta_state)
@@ -80,9 +105,13 @@ void app_wlan_init(void)
     /* BUSY pin workaround - disable power save */
     mmwlan_set_power_save_mode(MMWLAN_PS_DISABLED);
 
-    /* Fix MCS2 (QPSK 3/4), 2MHz BW, Long GI for long-range (~2km) drone operation */
-    status = mmwlan_ate_override_rate_control(MMWLAN_MCS_2, MMWLAN_BW_2MHZ, MMWLAN_GI_LONG);
-    printf("Rate control override: MCS2, BW=2MHz, GI=Long (status=%d)\n", status);
+    /* Register TX flow control callback to monitor pool saturation */
+    status = mmwlan_register_tx_flow_control_cb(tx_flow_control_cb, NULL);
+    printf("TX flow control callback registered (status=%d)\n", status);
+
+    /* MCS3 (16-QAM 1/2), 2MHz BW, Long GI — ~4Mbps theoretical, good for ≤2km drone */
+    status = mmwlan_ate_override_rate_control(MMWLAN_MCS_3, MMWLAN_BW_2MHZ, MMWLAN_GI_LONG);
+    printf("Rate control override: MCS3, BW=2MHz, GI=Long (status=%d)\n", status);
 
     mmwlan_set_channel_list(load_channel_list());
 

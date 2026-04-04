@@ -39,6 +39,9 @@ static void print_status(void)
 {
     printf("\n--- HaLow System Status ---\n");
     printf("WiFi HaLow: %s\n", app_wlan_is_connected() ? "CONNECTED" : "DISCONNECTED");
+    printf("TX flow: %s (pause_count=%lu)\n",
+           app_wlan_tx_is_paused() ? "PAUSED" : "ready",
+           (unsigned long)app_wlan_tx_pause_count());
     printf("Camera FPS: %.1f\n", camera_get_fps());
     printf("Free heap: %lu bytes (PSRAM: %lu bytes)\n",
            (unsigned long)esp_get_free_heap_size(),
