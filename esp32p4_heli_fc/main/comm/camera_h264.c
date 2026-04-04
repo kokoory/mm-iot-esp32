@@ -33,6 +33,7 @@
 
 #include "camera_h264.h"
 #include "thermal_camera.h"
+#include "gcs_bridge.h"
 #include "../common/i2c_sync.h"
 
 static const char *TAG = "camera_h264";
@@ -81,6 +82,7 @@ static const char *TAG = "camera_h264";
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
 #define RTP_PACING_MS       5            /* Delay between packets to avoid TX queue overflow */
+#define RTP_DEFAULT_DEST_IP "192.168.0.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
 #define STREAM_TARGET_FPS   5
@@ -234,9 +236,13 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
 {
     if (s_cam.rtp_sock < 0) return;
 
-    /* Don't send RTP to broadcast — HaLow broadcast doesn't reach destination
-     * and floods the TX queue, blocking HTTP traffic. Only send to unicast. */
-    if (s_cam.rtp_dest_addr.sin_addr.s_addr == htonl(INADDR_BROADCAST)) return;
+    /* Update RTP destination from GCS bridge if MAVLink heartbeat detected */
+    uint32_t gcs_ip = gcs_bridge_get_ip();
+    if (gcs_ip != 0 && gcs_ip != s_cam.rtp_dest_addr.sin_addr.s_addr) {
+        s_cam.rtp_dest_addr.sin_addr.s_addr = gcs_ip;
+        ESP_LOGI(TAG, "RTP destination updated to GCS: %s",
+                 inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
+    }
 
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
@@ -617,18 +623,16 @@ esp_err_t camera_h264_init(void)
     /* H.264 delivered via UDP RTP + HTTP/TCP backup */
     s_cam.rtp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s_cam.rtp_sock >= 0) {
-        int broadcast = 1;
-        setsockopt(s_cam.rtp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
-
         memset(&s_cam.rtp_dest_addr, 0, sizeof(s_cam.rtp_dest_addr));
         s_cam.rtp_dest_addr.sin_family = AF_INET;
         s_cam.rtp_dest_addr.sin_port = htons(RTP_PORT);
-        s_cam.rtp_dest_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST); /* Default to broadcast until GCS detected */
+        inet_aton(RTP_DEFAULT_DEST_IP, &s_cam.rtp_dest_addr.sin_addr);
 
         s_cam.rtp_seq = (uint16_t)esp_random();
         s_cam.rtp_ts = esp_random();
         s_cam.rtp_ssrc = esp_random();
-        ESP_LOGI(TAG, "RTP UDP socket initialized on port %d", RTP_PORT);
+        ESP_LOGI(TAG, "RTP UDP socket initialized → %s:%d (auto-updates from MAVLink GCS)",
+                 RTP_DEFAULT_DEST_IP, RTP_PORT);
     } else {
         ESP_LOGE(TAG, "Failed to create RTP UDP socket");
     }

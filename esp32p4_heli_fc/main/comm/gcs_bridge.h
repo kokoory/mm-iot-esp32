@@ -46,6 +46,12 @@ int gcs_bridge_recv(uint8_t *buf, size_t max_len, uint32_t timeout_ms);
 gcs_bridge_status_t gcs_bridge_get_status(void);
 
 /**
+ * Get the detected GCS IP address.
+ * Returns the IP address in network byte order, or 0 if not known.
+ */
+uint32_t gcs_bridge_get_ip(void);
+
+/**
  * Shutdown and cleanup the GCS bridge.
  */
 void gcs_bridge_deinit(void);
