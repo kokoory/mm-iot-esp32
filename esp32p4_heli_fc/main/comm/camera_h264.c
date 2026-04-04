@@ -234,6 +234,10 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
 {
     if (s_cam.rtp_sock < 0) return;
 
+    /* Don't send RTP to broadcast — HaLow broadcast doesn't reach destination
+     * and floods the TX queue, blocking HTTP traffic. Only send to unicast. */
+    if (s_cam.rtp_dest_addr.sin_addr.s_addr == htonl(INADDR_BROADCAST)) return;
+
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
 
