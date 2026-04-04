@@ -137,11 +137,6 @@ gcs_bridge_status_t gcs_bridge_get_status(void)
     return s_status;
 }
 
-uint32_t gcs_bridge_get_ip(void)
-{
-    return s_gcs_addr.sin_addr.s_addr;
-}
-
 void gcs_bridge_deinit(void)
 {
     if (s_sock >= 0) {
