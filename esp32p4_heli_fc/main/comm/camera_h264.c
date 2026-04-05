@@ -271,6 +271,16 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
 
     s_cam.rtp_frames_sent++;
 
+    /* Debug: log first few frames to verify Annex-B format */
+    if (s_cam.rtp_frames_sent <= 3) {
+        ESP_LOGI(TAG, "[rtp-debug] frame #%lu len=%u bytes[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x",
+                 (unsigned long)s_cam.rtp_frames_sent, (unsigned)len,
+                 len > 0 ? buf[0] : 0, len > 1 ? buf[1] : 0,
+                 len > 2 ? buf[2] : 0, len > 3 ? buf[3] : 0,
+                 len > 4 ? buf[4] : 0, len > 5 ? buf[5] : 0,
+                 len > 6 ? buf[6] : 0, len > 7 ? buf[7] : 0);
+    }
+
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
 
@@ -314,6 +324,16 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
             size_t payload_len = nal_len - 1;
 
             while (payload_len > 0) {
+                /* Check TX flow control for each fragment */
+                if (app_wlan_tx_is_paused()) {
+                    s_cam.rtp_pkts_dropped++;
+                    s_cam.rtp_backoff_count++;
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                    payload += payload_len; /* Skip rest of this NAL */
+                    payload_len = 0;
+                    break;
+                }
+
                 size_t chunk = (payload_len > (RTP_PKT_MAX_SIZE - 2)) ? (RTP_PKT_MAX_SIZE - 2) : payload_len;
                 bool first = (payload == nal_start + 1);
                 bool last = (chunk == payload_len);
@@ -327,8 +347,17 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
                 pkt[RTP_HEADER_SIZE + 1] = fu_header;
                 memcpy(pkt + RTP_HEADER_SIZE + 2, payload, chunk);
 
-                sendto(s_cam.rtp_sock, pkt, chunk + RTP_HEADER_SIZE + 2, 0,
-                       (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
+                int ret = sendto(s_cam.rtp_sock, pkt, chunk + RTP_HEADER_SIZE + 2, 0,
+                                 (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
+                if (ret < 0) {
+                    s_cam.rtp_pkts_dropped++;
+                    if (errno == ENOMEM || errno == EAGAIN || errno == EWOULDBLOCK) {
+                        s_cam.rtp_backoff_count++;
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                    }
+                } else {
+                    s_cam.rtp_pkts_sent++;
+                }
 
                 vTaskDelay(pdMS_TO_TICKS(RTP_PACING_MS));
 
