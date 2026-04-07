@@ -42,6 +42,7 @@ static void print_status(void)
     printf("TX flow: %s (pause_count=%lu)\n",
            app_wlan_tx_is_paused() ? "PAUSED" : "ready",
            (unsigned long)app_wlan_tx_pause_count());
+    printf("GCS: %s\n", gcs_bridge_is_active() ? "active" : "inactive");
     printf("Camera FPS: %.1f\n", camera_get_fps());
     printf("Free heap: %lu bytes (PSRAM: %lu bytes)\n",
            (unsigned long)esp_get_free_heap_size(),

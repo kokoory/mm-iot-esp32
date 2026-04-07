@@ -52,6 +52,12 @@ gcs_bridge_status_t gcs_bridge_get_status(void);
 uint32_t gcs_bridge_get_ip(void);
 
 /**
+ * Check if GCS is actively communicating (received packet within last 5 seconds).
+ * Use this for on-demand streaming: only send video when GCS is connected.
+ */
+bool gcs_bridge_is_active(void);
+
+/**
  * Shutdown and cleanup the GCS bridge.
  */
 void gcs_bridge_deinit(void);

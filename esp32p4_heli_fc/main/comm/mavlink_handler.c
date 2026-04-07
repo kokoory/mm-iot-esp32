@@ -17,6 +17,7 @@
  */
 #include "mavlink_handler.h"
 #include "gcs_bridge.h"
+#include "mm_app_common.h"
 #include "mavlink/mavlink_types.h"
 #include "mavlink/mavlink_msg.h"
 #include "../rpc/rpc_messages.h"
@@ -330,6 +331,11 @@ static void send_mavlink_msg(mavlink_message_t *msg)
 
     /* Drop non-critical telemetry when budget exhausted (always allow heartbeat) */
     if (s_tx_budget_count >= TX_BUDGET_MAX_PER_SEC && msg->msgid != 0 /* HEARTBEAT */) {
+        return;
+    }
+
+    /* Skip non-heartbeat when HaLow TX pool is congested */
+    if (app_wlan_tx_is_paused() && msg->msgid != 0 /* HEARTBEAT */) {
         return;
     }
 

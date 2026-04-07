@@ -7,6 +7,7 @@
  */
 #include "gcs_bridge.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include <string.h>
 #include <sys/socket.h>
@@ -22,6 +23,7 @@ static int s_sock = -1;
 static struct sockaddr_in s_gcs_addr;
 static bool s_gcs_addr_known = false;
 static gcs_bridge_status_t s_status = GCS_BRIDGE_DISCONNECTED;
+static int64_t s_last_recv_us = 0;  /* timestamp of last GCS packet */
 
 int gcs_bridge_init(void)
 {
@@ -74,10 +76,18 @@ int gcs_bridge_send(const uint8_t *buf, size_t len)
         return -1;
     }
 
+    /* Before GCS is detected, only allow small packets (heartbeat ~34 bytes)
+     * to avoid flooding HaLow TX pool with broadcast data */
+    if (!s_gcs_addr_known && len > 50) {
+        return 0;
+    }
+
     int ret = sendto(s_sock, buf, len, 0,
                      (struct sockaddr *)&s_gcs_addr, sizeof(s_gcs_addr));
     if (ret < 0) {
-        ESP_LOGW(TAG, "sendto failed: errno %d", errno);
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOMEM) {
+            ESP_LOGW(TAG, "sendto failed: errno %d", errno);
+        }
         return -1;
     }
 
@@ -108,6 +118,10 @@ int gcs_bridge_recv(uint8_t *buf, size_t max_len, uint32_t timeout_ms)
         }
         ESP_LOGW(TAG, "recvfrom failed: errno %d", errno);
         return -1;
+    }
+
+    if (ret > 0) {
+        s_last_recv_us = esp_timer_get_time();
     }
 
     if (ret > 0 && !s_gcs_addr_known) {
@@ -143,6 +157,13 @@ uint32_t gcs_bridge_get_ip(void)
         return s_gcs_addr.sin_addr.s_addr;
     }
     return 0;
+}
+
+bool gcs_bridge_is_active(void)
+{
+    if (!s_gcs_addr_known) return false;
+    int64_t elapsed_us = esp_timer_get_time() - s_last_recv_us;
+    return (elapsed_us < 5000000); /* Active if GCS packet received within 5 seconds */
 }
 
 void gcs_bridge_deinit(void)

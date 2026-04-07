@@ -188,7 +188,13 @@ static struct {
     uint32_t rtp_pkts_sent;
     uint32_t rtp_pkts_dropped;
     uint32_t rtp_frames_sent;
+    uint32_t rtp_frames_skipped;    /* Frames skipped due to congestion or no GCS */
     uint32_t rtp_backoff_count;
+
+    /* Adaptive streaming state */
+    uint32_t last_pause_count;      /* TX pause count at last check */
+    int skip_frames;                /* Number of frames to skip (congestion backoff) */
+    bool need_idr;                  /* Request IDR after skip */
 
 #if HAS_CAMERA_PIPELINE
     esp_cam_ctlr_handle_t cam_handle;
@@ -261,6 +267,31 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
 {
     if (s_cam.rtp_sock < 0) return;
 
+    /* On-demand: only send RTP when GCS is actively connected */
+    if (!gcs_bridge_is_active()) {
+        s_cam.rtp_frames_skipped++;
+        return;
+    }
+
+    /* Adaptive frame skip: back off when TX pool is congested */
+    if (s_cam.skip_frames > 0) {
+        s_cam.skip_frames--;
+        s_cam.rtp_frames_skipped++;
+        return;
+    }
+
+    /* Check if TX pool congestion increased — trigger adaptive backoff */
+    uint32_t cur_pause = app_wlan_tx_pause_count();
+    if (cur_pause > s_cam.last_pause_count) {
+        uint32_t delta = cur_pause - s_cam.last_pause_count;
+        /* Skip 2 frames per new pause event (gives HaLow time to drain) */
+        s_cam.skip_frames = delta * 2;
+        s_cam.need_idr = true;
+        ESP_LOGW(TAG, "[rtp] congestion: %lu new pauses, skipping %d frames",
+                 (unsigned long)delta, s_cam.skip_frames);
+    }
+    s_cam.last_pause_count = cur_pause;
+
     /* Update RTP destination from GCS bridge if MAVLink heartbeat detected */
     uint32_t gcs_ip = gcs_bridge_get_ip();
     if (gcs_ip != 0 && gcs_ip != s_cam.rtp_dest_addr.sin_addr.s_addr) {
@@ -324,14 +355,16 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
             size_t payload_len = nal_len - 1;
 
             while (payload_len > 0) {
-                /* Check TX flow control for each fragment */
+                /* Check TX flow control for each fragment.
+                 * If paused mid-NAL, skip remaining fragments AND remaining NALs
+                 * to avoid sending partial FU-A sequences that corrupt the decoder. */
                 if (app_wlan_tx_is_paused()) {
                     s_cam.rtp_pkts_dropped++;
                     s_cam.rtp_backoff_count++;
+                    s_cam.skip_frames = 2; /* Skip next 2 frames to let TX drain */
+                    s_cam.need_idr = true;
                     vTaskDelay(pdMS_TO_TICKS(20));
-                    payload += payload_len; /* Skip rest of this NAL */
-                    payload_len = 0;
-                    break;
+                    return; /* Abort entire frame — partial FU-A is undecodable */
                 }
 
                 size_t chunk = (payload_len > (RTP_PKT_MAX_SIZE - 2)) ? (RTP_PKT_MAX_SIZE - 2) : payload_len;
@@ -848,13 +881,15 @@ static void camera_capture_task(void *arg)
                          (unsigned long)(stat_h264_bytes / 1024),
                          s_cam.h264_clients);
             }
-            ESP_LOGI(TAG, "[rtp] sent=%lu drop=%lu frames=%lu backoff=%lu | tx_paused=%s pause_cnt=%lu | dest=%s",
+            ESP_LOGI(TAG, "[rtp] sent=%lu drop=%lu frames=%lu skip=%lu backoff=%lu | tx_paused=%s pause_cnt=%lu | gcs=%s dest=%s",
                      (unsigned long)s_cam.rtp_pkts_sent,
                      (unsigned long)s_cam.rtp_pkts_dropped,
                      (unsigned long)s_cam.rtp_frames_sent,
+                     (unsigned long)s_cam.rtp_frames_skipped,
                      (unsigned long)s_cam.rtp_backoff_count,
                      app_wlan_tx_is_paused() ? "YES" : "no",
                      (unsigned long)app_wlan_tx_pause_count(),
+                     gcs_bridge_is_active() ? "active" : "INACTIVE",
                      inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
             stat_frames = 0;
             stat_wait_us = stat_h264_us = 0;
@@ -895,15 +930,15 @@ static esp_err_t stream_handler(httpd_req_t *req)
 
 static esp_err_t status_handler(httpd_req_t *req)
 {
-    char buf[768];
+    char buf[896];
     snprintf(buf, sizeof(buf),
         "{\"initialized\":%s,\"resolution\":\"%dx%d\",\"fps\":%.1f,"
         "\"jpeg_encoder\":\"%s\",\"h264_encoder\":\"%s\","
         "\"h264_transport\":\"udp_rtp+http_tcp\",\"h264_port\":%d,"
         "\"rtp_dest\":\"%s\","
         "\"rtp_pkts_sent\":%lu,\"rtp_pkts_dropped\":%lu,"
-        "\"rtp_frames\":%lu,\"rtp_backoffs\":%lu,"
-        "\"tx_paused\":%s,\"tx_pause_count\":%lu,"
+        "\"rtp_frames\":%lu,\"rtp_frames_skipped\":%lu,\"rtp_backoffs\":%lu,"
+        "\"tx_paused\":%s,\"tx_pause_count\":%lu,\"gcs_active\":%s,"
         "\"pipeline\":\"csi_isp\","
         "\"vlc\":\"rtp://@:%d\"}",
         s_cam.initialized ? "true" : "false",
@@ -923,9 +958,11 @@ static esp_err_t status_handler(httpd_req_t *req)
         (unsigned long)s_cam.rtp_pkts_sent,
         (unsigned long)s_cam.rtp_pkts_dropped,
         (unsigned long)s_cam.rtp_frames_sent,
+        (unsigned long)s_cam.rtp_frames_skipped,
         (unsigned long)s_cam.rtp_backoff_count,
         app_wlan_tx_is_paused() ? "true" : "false",
         (unsigned long)app_wlan_tx_pause_count(),
+        gcs_bridge_is_active() ? "true" : "false",
         RTP_PORT);
 
     httpd_resp_set_type(req, "application/json");
