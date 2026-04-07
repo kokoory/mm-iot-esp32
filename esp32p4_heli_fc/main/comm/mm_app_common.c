@@ -109,9 +109,9 @@ void app_wlan_init(void)
     status = mmwlan_register_tx_flow_control_cb(tx_flow_control_cb, NULL);
     printf("TX flow control callback registered (status=%d)\n", status);
 
-    /* MCS3 (16-QAM 1/2), 2MHz BW, Long GI — ~4Mbps theoretical, good for ≤2km drone */
-    status = mmwlan_ate_override_rate_control(MMWLAN_MCS_3, MMWLAN_BW_2MHZ, MMWLAN_GI_LONG);
-    printf("Rate control override: MCS3, BW=2MHz, GI=Long (status=%d)\n", status);
+    /* MCS2 (QPSK 3/4), 2MHz BW, Long GI — ~2.6Mbps, reliable for long-range drone */
+    status = mmwlan_ate_override_rate_control(MMWLAN_MCS_2, MMWLAN_BW_2MHZ, MMWLAN_GI_LONG);
+    printf("Rate control override: MCS2, BW=2MHz, GI=Long (status=%d)\n", status);
 
     mmwlan_set_channel_list(load_channel_list());
 
@@ -156,10 +156,10 @@ void app_wlan_start(void)
     status = mmwlan_sta_enable(&sta_args, sta_status_callback);
     MMOSAL_ASSERT(status == MMWLAN_SUCCESS);
 
-    printf("Waiting for DHCP IP assignment...\n");
+    printf("Waiting for link up (IP assignment)...\n");
     while (!mmosal_semb_wait(link_established, 10000))
     {
-        printf("  Still waiting for DHCP... (%lu ms elapsed)\n", mmosal_get_time_ms());
+        printf("  Still waiting for link... (%lu ms elapsed)\n", mmosal_get_time_ms());
     }
     printf("DHCP IP assigned successfully.\n");
 }
