@@ -51,7 +51,7 @@ void load_mmipal_init_args(struct mmipal_init_args *args)
     (void)mmosal_safer_strcpy(args->netmask, STATIC_NETMASK, sizeof(args->netmask));
     (void)mmosal_safer_strcpy(args->gateway_addr, STATIC_GATEWAY, sizeof(args->gateway_addr));
 
-#ifdef ENABLE_DHCP
+#if ENABLE_DHCP
     args->mode = MMIPAL_DHCP;
 #else
     args->mode = MMIPAL_STATIC;
