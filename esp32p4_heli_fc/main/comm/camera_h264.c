@@ -72,9 +72,9 @@ static const char *TAG = "camera_h264";
 /* H.264 encoder settings */
 #define H264_GOP            10           /* Reduced from 60 to 10 for faster recovery on HaLow loss */
 #define H264_FPS            5            /* Encode at 5fps for HaLow bandwidth */
-#define H264_QP_MIN         32
+#define H264_QP_MIN         36           /* Force higher compression (was 32) */
 #define H264_QP_MAX         48           /* Aggressive compression for HaLow */
-#define H264_BITRATE        150000       /* 150 Kbps target (MCS2/2MHz ~400Kbps usable) */
+#define H264_BITRATE        100000       /* 100 Kbps target (was 150K — encoder overshot to 300K+) */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
@@ -83,6 +83,7 @@ static const char *TAG = "camera_h264";
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
 #define RTP_PACING_MS       5            /* Delay between packets to avoid TX queue overflow */
+#define RTP_MAX_FRAME_BYTES 8000         /* Skip frames larger than 8KB to prevent TX flooding */
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
@@ -258,9 +259,6 @@ static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
     }
 
     s_cam.rtp_pkts_sent++;
-
-    /* Pacing: delay between packets to prevent Morse Micro TX queue overflow */
-    vTaskDelay(pdMS_TO_TICKS(RTP_PACING_MS));
 }
 
 static void rtp_send_frame(const uint8_t *buf, size_t len)
@@ -277,6 +275,14 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
     if (s_cam.skip_frames > 0) {
         s_cam.skip_frames--;
         s_cam.rtp_frames_skipped++;
+        return;
+    }
+
+    /* Drop oversized frames (large I-frames that would flood TX pool) */
+    if (len > RTP_MAX_FRAME_BYTES) {
+        s_cam.rtp_frames_skipped++;
+        ESP_LOGW(TAG, "[rtp] frame too large: %u bytes > %d limit, skipping",
+                 (unsigned)len, RTP_MAX_FRAME_BYTES);
         return;
     }
 
@@ -315,6 +321,11 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
 
+    /* Dynamic pacing: larger frames get more delay between packets
+     * to avoid bursting the TX pool. Small frames (<2KB): 5ms, large (8KB): ~10ms */
+    int pacing_ms = RTP_PACING_MS + (int)(len / 2000);
+    if (pacing_ms > 15) pacing_ms = 15;
+
     /* Standard RTP timestamp: 90kHz clock for H.264 */
     s_cam.rtp_ts += (90000 / H264_FPS);
 
@@ -348,6 +359,7 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
         if (nal_len <= RTP_PKT_MAX_SIZE) {
             /* Single NAL unit packet */
             rtp_send_packet(nal_start, nal_len, (next == end));
+            vTaskDelay(pdMS_TO_TICKS(pacing_ms));
         } else {
             /* FU-A Fragmentation (RFC 6184) */
             uint8_t nal_header = nal_start[0];
@@ -392,7 +404,7 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
                     s_cam.rtp_pkts_sent++;
                 }
 
-                vTaskDelay(pdMS_TO_TICKS(RTP_PACING_MS));
+                vTaskDelay(pdMS_TO_TICKS(pacing_ms));
 
                 payload += chunk;
                 payload_len -= chunk;
