@@ -887,6 +887,7 @@ static esp_err_t stream_handler(httpd_req_t *req)
         "<h2>ESP32-P4 Helicopter</h2>"
         "<p><a href='/video' style='color:#0af;font-size:20px'>H.264 Video (HTTP backup)</a></p>"
         "<p style='color:#888;font-size:14px'>Primary: UDP RTP on port 5600 (auto-detect GCS IP)</p>"
+        "<p><a href='/stream.sdp' style='color:#0af;font-size:16px'>stream.sdp</a> — open in VLC for H.264 RTP</p>"
         "<p><a href='/thermal' style='color:#0af;font-size:20px'>Thermal Camera</a></p>"
         "<p><a href='/status' style='color:#0af;font-size:20px'>System Status</a></p>"
         "</body></html>", HTTPD_RESP_USE_STRLEN);
@@ -930,6 +931,38 @@ static esp_err_t status_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, buf, strlen(buf));
+}
+
+/* ========== SDP for VLC/ffplay RTP playback ========== */
+
+/*
+ * Serve SDP so VLC can open: http://<ip>/stream.sdp
+ * or: vlc http://192.168.1.2/stream.sdp
+ * or: ffplay -protocol_whitelist file,udp,rtp -i http://192.168.1.2/stream.sdp
+ */
+static esp_err_t sdp_handler(httpd_req_t *req)
+{
+    /* Get the client's IP so we can put the correct connection address */
+    char sdp[512];
+    snprintf(sdp, sizeof(sdp),
+        "v=0\r\n"
+        "o=- 0 0 IN IP4 0.0.0.0\r\n"
+        "s=ESP32-P4 H.264\r\n"
+        "c=IN IP4 0.0.0.0\r\n"
+        "t=0 0\r\n"
+        "m=video %d RTP/AVP %d\r\n"
+        "a=rtpmap:%d H264/90000\r\n"
+        "a=fmtp:%d packetization-mode=1\r\n"
+        "a=framerate:%d\r\n",
+        RTP_PORT, RTP_PAYLOAD_TYPE,
+        RTP_PAYLOAD_TYPE,
+        RTP_PAYLOAD_TYPE,
+        H264_FPS);
+
+    httpd_resp_set_type(req, "application/sdp");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"stream.sdp\"");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, sdp, strlen(sdp));
 }
 
 /* ========== H.264 HTTP Stream (TCP — replaces UDP RTP) ========== */
@@ -1177,6 +1210,12 @@ static const httpd_uri_t uri_video = {
     .handler = h264_stream_handler,
 };
 
+static const httpd_uri_t uri_sdp = {
+    .uri = "/stream.sdp",
+    .method = HTTP_GET,
+    .handler = sdp_handler,
+};
+
 httpd_handle_t camera_stream_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -1190,10 +1229,12 @@ httpd_handle_t camera_stream_server_start(void)
         httpd_register_uri_handler(server, &uri_stream);
         httpd_register_uri_handler(server, &uri_status);
         httpd_register_uri_handler(server, &uri_video);
+        httpd_register_uri_handler(server, &uri_sdp);
         httpd_register_uri_handler(server, &uri_thermal);
         httpd_register_uri_handler(server, &uri_thermal_raw);
         ESP_LOGI(TAG, "HTTP server started");
         ESP_LOGI(TAG, "  H.264:   rtp://@:5600 (primary) + http://<ip>/video (backup, %d fps)", STREAM_TARGET_FPS);
+        ESP_LOGI(TAG, "  SDP:     http://<ip>/stream.sdp (open in VLC)");
         ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser)");
         ESP_LOGI(TAG, "  Status:  http://<ip>/status");
     } else {
