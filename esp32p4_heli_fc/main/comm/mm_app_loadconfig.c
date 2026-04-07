@@ -27,7 +27,7 @@
 #define SECURITY_TYPE                   MMWLAN_SAE
 #endif
 
-#define ENABLE_DHCP                     (1)
+#define ENABLE_DHCP                     (0)
 
 #ifndef STATIC_LOCAL_IP
 #define STATIC_LOCAL_IP                 "192.168.1.2"
