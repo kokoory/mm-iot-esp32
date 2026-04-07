@@ -83,7 +83,7 @@ static const char *TAG = "camera_h264";
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
 #define RTP_PACING_MS       5            /* Delay between packets to avoid TX queue overflow */
-#define RTP_DEFAULT_DEST_IP "192.168.0.143"  /* Default GCS IP, updated by MAVLink heartbeat */
+#define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
 #define STREAM_TARGET_FPS   5
