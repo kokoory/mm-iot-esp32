@@ -1164,9 +1164,35 @@ static void handle_command_long(const mavlink_message_t *msg)
         /* param1=message_id, param2=interval_us (-1=disable, 0=default) */
         uint32_t mid = (uint32_t)param1;
         float interval_us = param2;
-        ESP_LOGI(TAG, "SET_MESSAGE_INTERVAL: msg=%lu interval=%.0fus",
-                 (unsigned long)mid, interval_us);
+
+        /* Convert interval_us to Hz, clamp to 1-10 Hz for HaLow bandwidth */
+        uint8_t new_hz = 0;
+        if (interval_us < 0) {
+            new_hz = 0; /* disable */
+        } else if (interval_us == 0) {
+            new_hz = 0; /* use default, don't change */
+        } else {
+            new_hz = (uint8_t)(1000000.0f / interval_us);
+            if (new_hz < 1) new_hz = 1;
+            if (new_hz > 10) new_hz = 10;
+        }
+
         result = MAV_RESULT_ACCEPTED;
+        if (new_hz > 0) {
+            switch (mid) {
+            case MAVLINK_MSG_ID_ATTITUDE:       s_config.attitude_hz = new_hz; break;
+            case MAVLINK_MSG_ID_GPS_RAW_INT:    s_config.gps_hz = new_hz; break;
+            case MAVLINK_MSG_ID_SYS_STATUS:     s_config.battery_hz = new_hz; break;
+            case MAVLINK_MSG_ID_VFR_HUD:        s_config.vfr_hud_hz = new_hz; break;
+            case MAVLINK_MSG_ID_HIGHRES_IMU:    /* accept but keep at 4Hz */ break;
+            case MAVLINK_MSG_ID_SERVO_OUTPUT_RAW: /* accept but keep at 2Hz */ break;
+            default:
+                /* Accept unknown message IDs silently (QGC expects ACCEPTED) */
+                break;
+            }
+        }
+        ESP_LOGI(TAG, "SET_MESSAGE_INTERVAL: msg=%lu interval=%.0fus → %dHz",
+                 (unsigned long)mid, interval_us, (int)new_hz);
         rpc_cmd.msg_type = 0;
         break;
     }
@@ -1197,9 +1223,9 @@ static void handle_command_long(const mavlink_message_t *msg)
         break;
     }
 
-    /* Send command ACK back to GCS */
+    /* Send command ACK back to GCS (with originator target for proper routing) */
     mavlink_message_t ack_msg;
-    mavlink_msg_command_ack_encode(&ack_msg, command, result);
+    mavlink_msg_command_ack_encode(&ack_msg, command, result, msg->sysid, msg->compid);
     send_mavlink_msg(&ack_msg);
 
     /* Forward to Core 0 if accepted and has valid msg_type */
@@ -1734,6 +1760,14 @@ static void process_mavlink_message(const mavlink_message_t *msg)
         break;
     case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
         handle_file_transfer_protocol(msg);
+        break;
+    case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
+        /* MAVLink v1 compat: QGC may send this instead of SET_MESSAGE_INTERVAL.
+         * Payload: target_system(1) target_component(1) req_stream_id(1)
+         *          req_message_rate(2) start_stop(1)
+         * Accept silently — our fixed telemetry rates are fine for HaLow. */
+        ESP_LOGI(TAG, "REQUEST_DATA_STREAM from sys=%d comp=%d (accepted, using fixed rates)",
+                 msg->sysid, msg->compid);
         break;
     default:
         ESP_LOGD(TAG, "Unhandled MAVLink msg ID: %lu from sys=%d comp=%d",

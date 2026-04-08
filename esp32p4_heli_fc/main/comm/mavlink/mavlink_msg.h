@@ -188,7 +188,8 @@ void mavlink_msg_command_long_decode(const mavlink_message_t *msg,
 /* ── Command Ack (ID 77) ─────────────────────────────────────── */
 
 void mavlink_msg_command_ack_encode(mavlink_message_t *msg,
-                                    uint16_t command, uint8_t result);
+                                    uint16_t command, uint8_t result,
+                                    uint8_t target_system, uint8_t target_component);
 
 /* ── Home Position (ID 242) ──────────────────────────────────── */
 

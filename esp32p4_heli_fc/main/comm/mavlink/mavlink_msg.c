@@ -656,17 +656,26 @@ void mavlink_msg_command_long_decode(const mavlink_message_t *msg,
 }
 
 /* ── Command Ack (ID 77) ─────────────────────────────────────── *
- * Payload layout (3 bytes):
+ * MAVLink v2 payload layout (10 bytes):
  *   0-1: command (uint16)
  *   2:   result (uint8)
+ *   3:   progress (uint8) — 0xFF = unknown
+ *   4-7: result_param2 (int32) — 0 = not used
+ *   8:   target_system (uint8) — sysid of command originator
+ *   9:   target_component (uint8) — compid of command originator
  */
 void mavlink_msg_command_ack_encode(mavlink_message_t *msg,
-                                    uint16_t command, uint8_t result)
+                                    uint16_t command, uint8_t result,
+                                    uint8_t target_system, uint8_t target_component)
 {
     msg_init(msg, MAVLINK_MSG_ID_COMMAND_ACK);
-    msg->len = 3;
+    msg->len = 10;
     put_u16(msg->payload, 0, command);
     put_u8(msg->payload, 2, result);
+    put_u8(msg->payload, 3, 0xFF);           /* progress: unknown */
+    put_u32(msg->payload, 4, 0);             /* result_param2: not used */
+    put_u8(msg->payload, 8, target_system);
+    put_u8(msg->payload, 9, target_component);
     mavlink_finalize(msg);
 }
 
