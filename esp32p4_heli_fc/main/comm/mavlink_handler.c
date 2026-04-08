@@ -54,7 +54,9 @@ static rpc_telemetry_msg_t s_param_value_queue[PARAM_VALUE_QUEUE_DEPTH];
 static int s_param_value_count = 0;
 static int s_param_value_send_idx = 0;   /* index of next param to send during paced bulk send */
 static uint32_t s_param_last_send_ms = 0; /* timestamp of last param send for pacing */
+static int s_param_send_pass = 0;        /* 0=first pass, 1=second pass (redundancy for packet loss) */
 #define PARAM_SEND_INTERVAL_MS 20        /* 20ms between PARAM_VALUE messages */
+#define PARAM_SEND_PASSES      2         /* Send params twice to overcome ~30% packet loss */
 
 /* ── Local parameter store (for QGC parameter download) ────────── */
 
@@ -89,11 +91,12 @@ static void param_store_init(void)
     } while (0)
 
     /* System identification */
-    ADD_PARAM("SYS_AUTOSTART",   0.0f);
+    ADD_PARAM("SYS_AUTOSTART",   7001.0f);  /* PX4 generic helicopter frame — 0 blocks QGC setup */
     ADD_PARAM("SYS_AUTOCONFIG",  0.0f);
+    ADD_PARAM("SYS_HITL",        0.0f);     /* QGC checks: 0 = not HITL */
     ADD_PARAM("MAV_SYS_ID",     1.0f);
     ADD_PARAM("MAV_COMP_ID",    1.0f);
-    ADD_PARAM("MAV_TYPE",       4.0f);   /* helicopter */
+    ADD_PARAM("MAV_TYPE",       4.0f);      /* helicopter */
     ADD_PARAM("MAV_PROTO_VER",  2.0f);
 
     /* Calibration offsets (gyro) */
@@ -122,10 +125,15 @@ static void param_store_init(void)
     ADD_PARAM("CAL_MAG0_ROT",   0.0f);
 
     /* Sensor enable */
+    ADD_PARAM("SYS_HAS_MAG",    1.0f);     /* QGC checks for mag presence */
     ADD_PARAM("SENS_EN_THERMAL",0.0f);
     ADD_PARAM("SENS_BOARD_ROT", 0.0f);
 
-    /* Battery */
+    /* Battery — QGC checks BAT1_ prefix in newer PX4, BAT_ in older */
+    ADD_PARAM("BAT1_SOURCE",    0.0f);     /* 0=power module */
+    ADD_PARAM("BAT1_V_CHARGED", 4.2f);
+    ADD_PARAM("BAT1_V_EMPTY",   3.5f);
+    ADD_PARAM("BAT1_N_CELLS",   6.0f);
     ADD_PARAM("BAT_V_CHARGED",  4.2f);
     ADD_PARAM("BAT_V_EMPTY",    3.5f);
     ADD_PARAM("BAT_N_CELLS",    6.0f);
@@ -149,6 +157,11 @@ static void param_store_init(void)
     ADD_PARAM("COM_ARM_EKF_AB",  0.0f);
     ADD_PARAM("COM_RC_IN_MODE",  0.0f);
     ADD_PARAM("COM_DISARM_LAND", 2.0f);
+    ADD_PARAM("CBRK_SUPPLY_CHK", 894281.0f); /* Bypass power supply check */
+    ADD_PARAM("CBRK_USB_CHK",    197848.0f); /* Bypass USB check */
+    ADD_PARAM("COM_FLTMODE1",    0.0f);     /* Flight mode channel 1 */
+    ADD_PARAM("COM_FLTMODE4",    2.0f);     /* Flight mode channel 4 */
+    ADD_PARAM("COM_FLTMODE6",    6.0f);     /* Flight mode channel 6 */
 
     #undef ADD_PARAM
 }
@@ -741,7 +754,9 @@ static void send_statustext_messages(void)
 
 static void send_param_values(void)
 {
-    /* Paced bulk send from local param store (PARAM_REQUEST_LIST) */
+    /* Paced bulk send from local param store (PARAM_REQUEST_LIST).
+     * Send params PARAM_SEND_PASSES times to overcome ~30% HaLow packet loss.
+     * QGC blocks Vehicle Setup if ANY param index is missing. */
     if (s_param_list_pending) {
         uint32_t now = get_time_ms();
         if ((now - s_param_last_send_ms) >= PARAM_SEND_INTERVAL_MS) {
@@ -760,9 +775,18 @@ static void send_param_values(void)
                 }
                 /* If send failed, don't advance index - retry next iteration */
             } else {
-                /* All params sent */
-                s_param_list_pending = false;
-                ESP_LOGI(TAG, "Param list complete: %d params sent", s_param_store_count);
+                /* All params sent in this pass */
+                s_param_send_pass++;
+                if (s_param_send_pass < PARAM_SEND_PASSES) {
+                    /* Start next pass for redundancy */
+                    s_param_value_send_idx = 0;
+                    ESP_LOGI(TAG, "Param pass %d complete, starting pass %d for redundancy",
+                             s_param_send_pass, s_param_send_pass + 1);
+                } else {
+                    s_param_list_pending = false;
+                    ESP_LOGI(TAG, "Param list complete: %d params × %d passes sent",
+                             s_param_store_count, PARAM_SEND_PASSES);
+                }
             }
         }
         return; /* Don't send queued RPC params while bulk send is active */
@@ -1330,13 +1354,14 @@ static void handle_param_request_list(const mavlink_message_t *msg)
     /* Initialize local param store if not done */
     param_store_init();
 
-    /* Start paced bulk send from local param store */
+    /* Start paced bulk send from local param store (multiple passes for loss resilience) */
     s_param_value_send_idx = 0;
     s_param_last_send_ms = 0;
+    s_param_send_pass = 0;
     s_param_list_pending = true;
 
-    ESP_LOGI(TAG, "PARAM_REQUEST_LIST: sending %d params (paced %dms)",
-             s_param_store_count, PARAM_SEND_INTERVAL_MS);
+    ESP_LOGI(TAG, "PARAM_REQUEST_LIST: sending %d params × %d passes (paced %dms)",
+             s_param_store_count, PARAM_SEND_PASSES, PARAM_SEND_INTERVAL_MS);
 }
 
 static void handle_param_set(const mavlink_message_t *msg)
