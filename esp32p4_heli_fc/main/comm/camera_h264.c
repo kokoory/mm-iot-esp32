@@ -69,12 +69,12 @@ static const char *TAG = "camera_h264";
 #define JPEG_QUALITY        30           /* Low quality for HaLow bandwidth */
 #define JPEG_BUF_SIZE       (100 * 1024) /* 100KB for low-quality 800x640 */
 
-/* H.264 encoder settings — higher defaults, tuned down dynamically if link is poor */
-#define H264_GOP            30           /* I-frame every 3 sec at 10fps */
-#define H264_FPS            10           /* Encode at 10fps (was 5) — smooth video */
-#define H264_QP_MIN         26           /* Better quality (was 30) */
+/* H.264 encoder settings — tuned for MM6108 SPI throughput limit (~150 KB/s) */
+#define H264_GOP            35           /* I-frame every 5 sec at 7fps */
+#define H264_FPS            7            /* 7fps — sweet spot between smoothness and SPI headroom */
+#define H264_QP_MIN         28           /* Good quality */
 #define H264_QP_MAX         42           /* Allow aggressive compression when needed */
-#define H264_BITRATE        500000       /* 500 Kbps target (was 250K) — uses ~60% of MCS2 throughput */
+#define H264_BITRATE        350000       /* 350 Kbps target — fits within 150 KB/s TX budget with overhead */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
@@ -82,14 +82,14 @@ static const char *TAG = "camera_h264";
 #define RTP_PKT_MAX_SIZE    1200         /* Small packets for HaLow stability */
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
-#define RTP_PACING_MS       2            /* Base pacing for P-frames */
-#define RTP_PACING_I_MS     8            /* I-frame pacing (dynamic budget prevents SPI overflow now) */
-#define RTP_MAX_P_FRAME     12000        /* Skip P-frames larger than 12KB (was 6KB) */
+#define RTP_PACING_MS       3            /* Base pacing for P-frames */
+#define RTP_PACING_I_MS     12           /* I-frame pacing: must be >=12ms to avoid SPI page overflow */
+#define RTP_MAX_P_FRAME     8000         /* Skip P-frames larger than 8KB */
 #define RTP_I_WAIT_TIMEOUT_MS 300        /* Max wait for TX drain during I-frame (prevents infinite stall) */
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
-#define STREAM_TARGET_FPS   10
+#define STREAM_TARGET_FPS   7
 
 /* Set to 1 to enable MJPEG HTTP streaming (requires YUV422 ISP output — conflicts with H.264 YUV420) */
 #define ENABLE_MJPEG        0
@@ -240,8 +240,8 @@ static void rtp_header_serialize(uint8_t *buf, uint16_t seq, uint32_t ts, uint32
 /* Dynamic TX byte rate budget based on link quality.
  * Reserve 30% of usable throughput for MAVLink telemetry.
  * Update every 2 seconds from MCS/loss stats. */
-#define RTP_TX_BUDGET_MIN        50000   /* 50 KB/s floor (MCS0 / very lossy) */
-#define RTP_TX_BUDGET_MAX       400000   /* 400 KB/s ceiling (MCS7+ / low loss) */
+#define RTP_TX_BUDGET_MIN        40000   /* 40 KB/s floor (MCS0 / very lossy) */
+#define RTP_TX_BUDGET_MAX       150000   /* 150 KB/s ceiling — MM6108 SPI page buffer limit */
 #define RTP_TX_BUDGET_DEFAULT    75000   /* Default before first measurement */
 #define RTP_BUDGET_UPDATE_MS      2000   /* Re-evaluate link quality every 2s */
 #define RTP_MAVLINK_RESERVE_PCT     30   /* Reserve 30% of throughput for MAVLink */
