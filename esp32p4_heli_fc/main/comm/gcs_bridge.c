@@ -6,8 +6,11 @@
  * Falls back to broadcast if no GCS has been detected yet.
  */
 #include "gcs_bridge.h"
+#include "mm_app_common.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <string.h>
 #include <sys/socket.h>
@@ -81,6 +84,13 @@ int gcs_bridge_send(const uint8_t *buf, size_t len)
      * Once GCS is detected, all packets are sent via unicast. */
     if (!s_gcs_addr_known && len > 50) {
         return 0;
+    }
+
+    /* Back-pressure: if SPI TX pool is congested, delay briefly to avoid
+     * hammering the MM6108 SPI page buffer — prevents the error cascade
+     * that overflows the health task stack. */
+    if (app_wlan_tx_is_paused()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     int ret = sendto(s_sock, buf, len, 0,

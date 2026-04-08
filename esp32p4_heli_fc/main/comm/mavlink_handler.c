@@ -727,7 +727,7 @@ static void send_vfr_hud(void)
 
 static void send_servo_output(void)
 {
-    if (!s_has_servo || !rate_check(&s_last_servo_ms, 2)) { /* 2 Hz */
+    if (!s_has_servo || !rate_check(&s_last_servo_ms, 1)) { /* 1 Hz */
         return;
     }
 
@@ -844,7 +844,7 @@ static void send_home_position(void)
 
 static void send_vibration(void)
 {
-    if (!rate_check(&s_last_vibration_ms, 2)) { /* 2 Hz */
+    if (!rate_check(&s_last_vibration_ms, 1)) { /* 1 Hz */
         return;
     }
 
@@ -891,7 +891,7 @@ static void send_estimator_status(void)
 
 static void send_highres_imu(void)
 {
-    if (!s_has_imu_raw || !rate_check(&s_last_highres_ms, 4)) { /* 4 Hz */
+    if (!s_has_imu_raw || !rate_check(&s_last_highres_ms, 2)) { /* 2 Hz */
         return;
     }
 
@@ -1919,12 +1919,13 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     if (config) {
         s_config = *config;
     } else {
-        /* Default rates — higher now with dynamic TX budget */
+        /* Conservative rates — must share SPI 16-page buffer with video RTP.
+         * Total MAVLink target: ~15 msg/s to leave headroom for video. */
         s_config.heartbeat_hz  = 1;
-        s_config.attitude_hz   = 10;
-        s_config.gps_hz        = 5;
-        s_config.battery_hz    = 5;
-        s_config.vfr_hud_hz   = 5;
+        s_config.attitude_hz   = 4;
+        s_config.gps_hz        = 2;
+        s_config.battery_hz    = 2;
+        s_config.vfr_hud_hz   = 2;
     }
 
     mavlink_parser_init(&s_parser);

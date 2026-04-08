@@ -78,15 +78,15 @@ static const char *TAG = "camera_h264";
 #define H264_BUF_SIZE       (100 * 1024)
 
 /* MJPEG encoder settings (primary — no I-frame burst, smooth SPI traffic) */
-#define MJPEG_QUALITY       15           /* JPEG quality 1-100 (15 ≈ 8-12KB per frame at 800x640) */
-#define MJPEG_FPS           5            /* Target FPS — must fit within ~60KB/s effective throughput */
+#define MJPEG_QUALITY       10           /* JPEG quality 1-100 (10 ≈ 5-8KB per frame at 800x640) */
+#define MJPEG_FPS           3            /* Target FPS — total SPI budget shared with MAVLink */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
 #define RTP_PORT            5600
 #define RTP_PKT_MAX_SIZE    1200         /* Small packets for HaLow stability */
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
-#define RTP_PACING_MS       5            /* Base pacing — increased for SPI page safety */
+#define RTP_PACING_MS       10           /* Base pacing — prevents SPI 16-page overflow */
 #define RTP_PACING_I_MS     12           /* I-frame pacing: must be >=12ms to avoid SPI page overflow */
 #define RTP_MAX_P_FRAME     8000         /* Skip P-frames larger than 8KB */
 #define RTP_I_WAIT_TIMEOUT_MS 300        /* Max wait for TX drain during I-frame (prevents infinite stall) */
@@ -244,9 +244,9 @@ static void rtp_header_serialize(uint8_t *buf, uint16_t seq, uint32_t ts, uint32
 /* Dynamic TX byte rate budget based on link quality.
  * Reserve 30% of usable throughput for MAVLink telemetry.
  * Update every 2 seconds from MCS/loss stats. */
-#define RTP_TX_BUDGET_MIN        30000   /* 30 KB/s floor (MCS0 / very lossy) */
-#define RTP_TX_BUDGET_MAX        80000   /* 80 KB/s ceiling — conservative for SPI 16-page buffer */
-#define RTP_TX_BUDGET_DEFAULT    50000   /* Default before first measurement */
+#define RTP_TX_BUDGET_MIN        15000   /* 15 KB/s floor (MCS0 / very lossy) */
+#define RTP_TX_BUDGET_MAX        40000   /* 40 KB/s ceiling — must share SPI with MAVLink */
+#define RTP_TX_BUDGET_DEFAULT    25000   /* Default before first measurement */
 #define RTP_BUDGET_WINDOW_MS       200   /* Budget window: 200ms (prevents burst within 1s) */
 #define RTP_BUDGET_UPDATE_MS      2000   /* Re-evaluate link quality every 2s */
 #define RTP_MAVLINK_RESERVE_PCT     30   /* Reserve 30% of throughput for MAVLink */
