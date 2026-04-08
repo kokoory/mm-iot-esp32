@@ -905,19 +905,19 @@ void mavlink_msg_extended_sys_state_encode(mavlink_message_t *msg,
 }
 
 /* ── Autopilot Version (ID 148) ──────────────────────────────── *
- * Payload layout (78 bytes):
+ * MAVLink v2 wire order (fields sorted by type size, largest first):
  *   0-7:   capabilities (uint64)
- *   8-11:  flight_sw_version (uint32)
- *   12-15: middleware_sw_version (uint32)
- *   16-19: os_sw_version (uint32)
- *   20-23: board_version (uint32)
- *   24-31: flight_custom_version (uint8[8])
- *   32-39: middleware_custom_version (uint8[8])
- *   40-47: os_custom_version (uint8[8])
- *   48-49: vendor_id (uint16)
- *   50-51: product_id (uint16)
- *   52-59: uid (uint64)
- *   60-77: uid2 (uint8[18]) - optional extension
+ *   8-15:  uid (uint64)
+ *   16-19: flight_sw_version (uint32)
+ *   20-23: middleware_sw_version (uint32)
+ *   24-27: os_sw_version (uint32)
+ *   28-31: board_version (uint32)
+ *   32-33: vendor_id (uint16)
+ *   34-35: product_id (uint16)
+ *   36-43: flight_custom_version (uint8[8])
+ *   44-51: middleware_custom_version (uint8[8])
+ *   52-59: os_custom_version (uint8[8])
+ *   --- extensions (not sent, uid2) ---
  */
 void mavlink_msg_autopilot_version_encode(mavlink_message_t *msg,
                                           uint64_t capabilities,
@@ -932,17 +932,17 @@ void mavlink_msg_autopilot_version_encode(mavlink_message_t *msg,
     msg->len = 60;
     memset(msg->payload, 0, 60);
     put_u64(msg->payload, 0, capabilities);
-    put_u32(msg->payload, 8, flight_sw_version);
-    put_u32(msg->payload, 12, middleware_sw_version);
-    put_u32(msg->payload, 16, os_sw_version);
-    put_u32(msg->payload, 20, board_version);
+    put_u64(msg->payload, 8, uid);
+    put_u32(msg->payload, 16, flight_sw_version);
+    put_u32(msg->payload, 20, middleware_sw_version);
+    put_u32(msg->payload, 24, os_sw_version);
+    put_u32(msg->payload, 28, board_version);
+    put_u16(msg->payload, 32, 0); /* vendor_id */
+    put_u16(msg->payload, 34, 0); /* product_id */
     if (flight_custom_version) {
-        memcpy(&msg->payload[24], flight_custom_version, 8);
+        memcpy(&msg->payload[36], flight_custom_version, 8);
     }
-    /* middleware_custom_version at 32, os_custom_version at 40: leave as 0 */
-    put_u16(msg->payload, 48, 0); /* vendor_id */
-    put_u16(msg->payload, 50, 0); /* product_id */
-    put_u64(msg->payload, 52, uid);
+    /* middleware_custom_version at 44, os_custom_version at 52: leave as 0 */
     mavlink_finalize(msg);
 }
 
