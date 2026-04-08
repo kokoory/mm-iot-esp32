@@ -108,7 +108,7 @@ void app_wlan_get_link_quality(app_wlan_link_quality_t *out)
     memset(out, 0, sizeof(*out));
     out->mcs = 0xFF;
     out->bw_mhz = 2;
-    out->throughput_bps = 75000; /* safe default: 600 kbps */
+    out->throughput_bps = 95000; /* safe default: ~760 kbps (MCS2 2MHz 30% loss) */
 
     struct mmwlan_rc_stats *rc = mmwlan_get_rc_stats();
     if (!rc || rc->n_entries == 0) {
@@ -146,8 +146,8 @@ void app_wlan_get_link_quality(app_wlan_link_quality_t *out)
         else if (out->bw_mhz == 4) phy_kbps *= 2;
         /* SGI: ~11% faster */
         if (gi) phy_kbps = phy_kbps * 111 / 100;
-        /* MAC overhead (~60% of PHY rate is usable data) */
-        uint32_t mac_kbps = phy_kbps * 60 / 100;
+        /* MAC overhead (~70% of PHY rate is usable data for UDP streaming) */
+        uint32_t mac_kbps = phy_kbps * 70 / 100;
         /* Packet loss */
         uint32_t usable_kbps = mac_kbps * (100 - out->loss_pct) / 100;
         /* Convert to bytes/sec */
