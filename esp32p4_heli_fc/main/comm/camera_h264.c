@@ -75,9 +75,9 @@ static const char *TAG = "camera_h264";
 #define JPEG_QUALITY        30           /* Low quality for HaLow bandwidth */
 #define JPEG_BUF_SIZE       (100 * 1024) /* 100KB for low-quality 800x640 */
 
-/* H.264 encoder settings (fallback — MJPEG is now primary) */
+/* H.264 encoder settings (primary) */
 #define H264_GOP            35
-#define H264_FPS            7
+#define H264_FPS            1
 #define H264_QP_MIN         28
 #define H264_QP_MAX         42
 #define H264_BITRATE        350000
@@ -98,11 +98,15 @@ static const char *TAG = "camera_h264";
 #define RTP_I_WAIT_TIMEOUT_MS 300        /* Max wait for TX drain during I-frame (prevents infinite stall) */
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
-/* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
-#define STREAM_TARGET_FPS   MJPEG_FPS
+/* Set to 1 to enable MJPEG, 0 for H.264 (primary) */
+#define ENABLE_MJPEG        0
 
-/* Set to 1 to enable MJPEG HTTP streaming (requires YUV422 ISP output — conflicts with H.264 YUV420) */
-#define ENABLE_MJPEG        1
+/* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
+#if ENABLE_MJPEG
+#define STREAM_TARGET_FPS   MJPEG_FPS
+#else
+#define STREAM_TARGET_FPS   H264_FPS
+#endif
 
 /* Double buffer for raw frames and encoded output */
 #define NUM_BUFS            2
@@ -1203,8 +1207,10 @@ static void camera_capture_task(void *arg)
         esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        /* Software 2x downscale: capture res → stream res */
-#if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
+        /* Software 2x downscale for MJPEG: capture res → stream res.
+         * H.264 uses full capture resolution directly. */
+#if ENABLE_MJPEG
+#if !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
         downscale_2x_yuv422(frame_data, s_cam.scale_buf,
                             CAM_CAPTURE_W, CAM_CAPTURE_H);
 #else
@@ -1214,9 +1220,8 @@ static void camera_capture_task(void *arg)
         /* Flush downscaled buffer to PSRAM for HW encoder DMA access */
         esp_cache_msync(s_cam.scale_buf, s_cam.scale_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-
-        /* Use downscaled frame for encoding */
         uint8_t *encode_data = s_cam.scale_buf;
+#endif /* ENABLE_MJPEG */
 
         /* === MJPEG encode → send via UDP RTP (Primary path) === */
         int64_t t2 = t1;
@@ -1402,7 +1407,11 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"pipeline\":\"csi_isp\","
         "\"vlc\":\"rtp://@:%d\"}",
         s_cam.initialized ? "true" : "false",
+#if ENABLE_MJPEG
         CAM_WIDTH, CAM_HEIGHT, s_cam.fps,
+#else
+        CAM_CAPTURE_W, CAM_CAPTURE_H, s_cam.fps,
+#endif
 #if HAS_HW_JPEG
         "hw",
 #else
