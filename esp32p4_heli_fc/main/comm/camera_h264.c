@@ -83,8 +83,9 @@ static const char *TAG = "camera_h264";
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
 #define RTP_PACING_MS       3            /* Base pacing for P-frames (was 5) */
-#define RTP_PACING_I_MS     8            /* Pacing for I-frame packets (spread burst) */
+#define RTP_PACING_I_MS     15           /* I-frame pacing: ~80KB/s burst (was 8 → 175KB/s which overflows MM6108 SPI) */
 #define RTP_MAX_P_FRAME     6000         /* Skip P-frames larger than 6KB */
+#define RTP_I_WAIT_TIMEOUT_MS 300        /* Max wait for TX drain during I-frame (prevents infinite stall) */
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
@@ -198,6 +199,10 @@ static struct {
     int skip_frames;                /* Number of frames to skip (congestion backoff) */
     bool need_idr;                  /* Request IDR after skip */
 
+    /* TX byte rate tracking (prevent SPI overflow) */
+    uint32_t tx_bytes_this_sec;     /* Bytes sent in current 1-second window */
+    uint32_t tx_window_start;       /* Tick count at window start */
+
 #if HAS_CAMERA_PIPELINE
     esp_cam_ctlr_handle_t cam_handle;
 #endif
@@ -230,6 +235,23 @@ static void rtp_header_serialize(uint8_t *buf, uint16_t seq, uint32_t ts, uint32
     buf[9] = (ssrc >> 16) & 0xFF;
     buf[10] = (ssrc >> 8) & 0xFF;
     buf[11] = ssrc & 0xFF;
+}
+
+/* TX byte rate budget: ~75 KB/s = 600 kbps (safe for MCS2 with 30% loss) */
+#define RTP_TX_BUDGET_BYTES_PER_SEC  75000
+
+static bool rtp_tx_budget_check(size_t bytes)
+{
+    uint32_t now = xTaskGetTickCount();
+    if ((now - s_cam.tx_window_start) >= pdMS_TO_TICKS(1000)) {
+        s_cam.tx_bytes_this_sec = 0;
+        s_cam.tx_window_start = now;
+    }
+    if (s_cam.tx_bytes_this_sec + bytes > RTP_TX_BUDGET_BYTES_PER_SEC) {
+        return false; /* over budget */
+    }
+    s_cam.tx_bytes_this_sec += bytes;
+    return true;
 }
 
 static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
@@ -383,9 +405,20 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
                  * For P-frames: abort to avoid partial FU-A corruption */
                 if (app_wlan_tx_is_paused()) {
                     if (has_idr) {
-                        /* I-frame: wait for TX pool to drain, then continue */
+                        /* I-frame: wait for TX pool to drain, with timeout to
+                         * prevent infinite stall if MM6108 enters error state */
+                        uint32_t wait_start = xTaskGetTickCount();
                         while (app_wlan_tx_is_paused()) {
                             vTaskDelay(pdMS_TO_TICKS(10));
+                            if ((xTaskGetTickCount() - wait_start) > pdMS_TO_TICKS(RTP_I_WAIT_TIMEOUT_MS)) {
+                                ESP_LOGW(TAG, "[rtp] I-frame TX wait timeout (%dms), aborting frame",
+                                         RTP_I_WAIT_TIMEOUT_MS);
+                                s_cam.rtp_pkts_dropped++;
+                                s_cam.rtp_backoff_count++;
+                                s_cam.skip_frames = 4; /* Skip more after timeout */
+                                vTaskDelay(pdMS_TO_TICKS(50));
+                                return;
+                            }
                         }
                     } else {
                         /* P-frame: abort — partial FU-A is undecodable */
@@ -398,8 +431,23 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
                 }
 
                 size_t chunk = (payload_len > (RTP_PKT_MAX_SIZE - 2)) ? (RTP_PKT_MAX_SIZE - 2) : payload_len;
+                size_t pkt_total = chunk + RTP_HEADER_SIZE + 2;
                 bool first = (payload == nal_start + 1);
                 bool last = (chunk == payload_len);
+
+                /* Byte rate budget check: wait if over budget (prevents SPI overflow) */
+                if (!rtp_tx_budget_check(pkt_total)) {
+                    /* Over byte rate budget — wait for next window.
+                     * For P-frames, abort; for I-frames, wait briefly. */
+                    if (!has_idr) {
+                        s_cam.rtp_pkts_dropped++;
+                        s_cam.skip_frames = 2;
+                        return;
+                    }
+                    /* I-frame: wait 50ms then recheck */
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    rtp_tx_budget_check(pkt_total); /* retry (window may have reset) */
+                }
 
                 uint8_t fu_indicator = (nal_header & 0xE0) | 28; // FU-A type 28
                 uint8_t fu_header = (first ? 0x80 : 0) | (last ? 0x40 : 0) | nal_type;
@@ -410,7 +458,7 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
                 pkt[RTP_HEADER_SIZE + 1] = fu_header;
                 memcpy(pkt + RTP_HEADER_SIZE + 2, payload, chunk);
 
-                int ret = sendto(s_cam.rtp_sock, pkt, chunk + RTP_HEADER_SIZE + 2, 0,
+                int ret = sendto(s_cam.rtp_sock, pkt, pkt_total, 0,
                                  (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
                 if (ret < 0) {
                     s_cam.rtp_pkts_dropped++;
