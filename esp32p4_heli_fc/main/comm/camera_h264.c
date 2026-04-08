@@ -89,7 +89,7 @@ static const char *TAG = "camera_h264";
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
-#define STREAM_TARGET_FPS   5
+#define STREAM_TARGET_FPS   10
 
 /* Set to 1 to enable MJPEG HTTP streaming (requires YUV422 ISP output — conflicts with H.264 YUV420) */
 #define ENABLE_MJPEG        0
