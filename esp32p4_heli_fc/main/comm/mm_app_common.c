@@ -50,6 +50,44 @@ uint32_t app_wlan_tx_pause_count(void)
     return s_tx_pause_count;
 }
 
+int32_t app_wlan_get_rssi(void)
+{
+    return mmwlan_get_rssi();
+}
+
+void app_wlan_print_link_stats(void)
+{
+    int32_t rssi = mmwlan_get_rssi();
+    printf("  RSSI: %ld dBm\n", (long)rssi);
+
+    struct mmwlan_rc_stats *rc = mmwlan_get_rc_stats();
+    if (rc && rc->n_entries > 0) {
+        /* Find the most-used rate (highest total_sent) */
+        uint32_t best_idx = 0;
+        uint32_t best_sent = 0;
+        for (uint32_t i = 0; i < rc->n_entries; i++) {
+            if (rc->total_sent[i] > best_sent) {
+                best_sent = rc->total_sent[i];
+                best_idx = i;
+            }
+        }
+        if (best_sent > 0) {
+            uint32_t info = rc->rate_info[best_idx];
+            uint32_t bw = info & 0x0F;
+            uint32_t mcs = (info >> 4) & 0x0F;
+            uint32_t gi = (info >> 8) & 0x01;
+            uint32_t success = rc->total_success[best_idx];
+            printf("  Active MCS: MCS%lu %s %sMHz (sent=%lu ok=%lu loss=%.1f%%)\n",
+                   (unsigned long)mcs,
+                   gi ? "SGI" : "LGI",
+                   bw == 0 ? "1" : bw == 1 ? "2" : "4",
+                   (unsigned long)best_sent,
+                   (unsigned long)success,
+                   best_sent > 0 ? (1.0f - (float)success / (float)best_sent) * 100.0f : 0.0f);
+        }
+    }
+}
+
 static void sta_status_callback(enum mmwlan_sta_state sta_state)
 {
     switch (sta_state)

@@ -39,6 +39,9 @@ static void print_status(void)
 {
     printf("\n--- HaLow System Status ---\n");
     printf("WiFi HaLow: %s\n", app_wlan_is_connected() ? "CONNECTED" : "DISCONNECTED");
+    if (app_wlan_is_connected()) {
+        app_wlan_print_link_stats();
+    }
     printf("TX flow: %s (pause_count=%lu)\n",
            app_wlan_tx_is_paused() ? "PAUSED" : "ready",
            (unsigned long)app_wlan_tx_pause_count());
