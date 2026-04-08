@@ -69,13 +69,17 @@ static const char *TAG = "camera_h264";
 #define JPEG_QUALITY        30           /* Low quality for HaLow bandwidth */
 #define JPEG_BUF_SIZE       (100 * 1024) /* 100KB for low-quality 800x640 */
 
-/* H.264 encoder settings — tuned for MM6108 SPI throughput limit (~150 KB/s) */
-#define H264_GOP            35           /* I-frame every 5 sec at 7fps */
-#define H264_FPS            7            /* 7fps — sweet spot between smoothness and SPI headroom */
-#define H264_QP_MIN         28           /* Good quality */
-#define H264_QP_MAX         42           /* Allow aggressive compression when needed */
-#define H264_BITRATE        350000       /* 350 Kbps target — fits within 150 KB/s TX budget with overhead */
-#define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
+/* H.264 encoder settings (fallback — MJPEG is now primary) */
+#define H264_GOP            35
+#define H264_FPS            7
+#define H264_QP_MIN         28
+#define H264_QP_MAX         42
+#define H264_BITRATE        350000
+#define H264_BUF_SIZE       (100 * 1024)
+
+/* MJPEG encoder settings (primary — no I-frame burst, smooth SPI traffic) */
+#define MJPEG_QUALITY       40           /* JPEG quality 1-100 (40 ≈ 10-15KB per frame at 800x640) */
+#define MJPEG_FPS           7            /* Target FPS */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
 #define RTP_PORT            5600
@@ -89,10 +93,10 @@ static const char *TAG = "camera_h264";
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
-#define STREAM_TARGET_FPS   7
+#define STREAM_TARGET_FPS   MJPEG_FPS
 
 /* Set to 1 to enable MJPEG HTTP streaming (requires YUV422 ISP output — conflicts with H.264 YUV420) */
-#define ENABLE_MJPEG        0
+#define ENABLE_MJPEG        1
 
 /* Double buffer for raw frames and encoded output */
 #define NUM_BUFS            2
@@ -319,6 +323,145 @@ static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
 
     s_cam.rtp_pkts_sent++;
 }
+
+/* ========== MJPEG RTP Sender ========== */
+
+/**
+ * Send a JPEG frame over RTP using RFC 2435 framing.
+ * Each JPEG is fragmented into RTP packets with a JPEG-specific header.
+ * This produces smooth, constant-rate traffic (no I-frame burst).
+ *
+ * RFC 2435 JPEG header (8 bytes):
+ *   0:     Type-specific (0)
+ *   1-3:   Fragment offset (24-bit big-endian)
+ *   4:     Type (1 = JPEG YUV422, 0 = YUV420)
+ *   5:     Q (quality factor, >= 128 means custom tables follow)
+ *   6:     Width / 8
+ *   7:     Height / 8
+ */
+#define JPEG_RTP_HEADER_SIZE  8
+#define JPEG_RTP_MAX_PAYLOAD  (RTP_PKT_MAX_SIZE - JPEG_RTP_HEADER_SIZE)
+
+static void rtp_send_jpeg_frame(const uint8_t *jpeg_data, size_t jpeg_len)
+{
+    if (s_cam.rtp_sock < 0) return;
+
+    /* Periodically update TX budget based on link quality */
+    rtp_update_tx_budget();
+
+    /* On-demand: only send RTP when GCS is actively connected */
+    if (!gcs_bridge_is_active()) {
+        s_cam.rtp_frames_skipped++;
+        return;
+    }
+
+    /* Adaptive frame skip: back off when TX pool is congested */
+    if (s_cam.skip_frames > 0) {
+        s_cam.skip_frames--;
+        s_cam.rtp_frames_skipped++;
+        return;
+    }
+
+    /* Check if TX pool congestion increased */
+    uint32_t cur_pause = app_wlan_tx_pause_count();
+    if (cur_pause > s_cam.last_pause_count) {
+        uint32_t delta = cur_pause - s_cam.last_pause_count;
+        s_cam.skip_frames = delta * 2;
+        ESP_LOGW(TAG, "[rtp] congestion: %lu new pauses, skip %d frames",
+                 (unsigned long)delta, s_cam.skip_frames);
+    }
+    s_cam.last_pause_count = cur_pause;
+
+    /* Update RTP destination from GCS bridge */
+    uint32_t gcs_ip = gcs_bridge_get_ip();
+    if (gcs_ip != 0 && gcs_ip != s_cam.rtp_dest_addr.sin_addr.s_addr) {
+        s_cam.rtp_dest_addr.sin_addr.s_addr = gcs_ip;
+        ESP_LOGI(TAG, "RTP destination updated to GCS: %s",
+                 inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
+    }
+
+    s_cam.rtp_frames_sent++;
+
+    /* Skip the JPEG SOI (FF D8) and EOI (FF D9) markers for RFC 2435.
+     * Receivers reconstruct them from the RTP JPEG header. */
+    const uint8_t *data = jpeg_data;
+    size_t data_len = jpeg_len;
+
+    /* Skip SOI marker (0xFFD8) if present */
+    if (data_len >= 2 && data[0] == 0xFF && data[1] == 0xD8) {
+        data += 2;
+        data_len -= 2;
+    }
+    /* Strip EOI marker (0xFFD9) if present */
+    if (data_len >= 2 && data[data_len - 2] == 0xFF && data[data_len - 1] == 0xD9) {
+        data_len -= 2;
+    }
+
+    /* RTP timestamp: 90kHz clock */
+    s_cam.rtp_ts += (90000 / MJPEG_FPS);
+
+    uint32_t offset = 0;
+    while (offset < data_len) {
+        /* Check TX flow control */
+        if (app_wlan_tx_is_paused()) {
+            s_cam.rtp_pkts_dropped++;
+            s_cam.rtp_backoff_count++;
+            vTaskDelay(pdMS_TO_TICKS(20));
+            return; /* Abort frame — MJPEG frames are independent, no corruption */
+        }
+
+        size_t chunk = data_len - offset;
+        if (chunk > JPEG_RTP_MAX_PAYLOAD) chunk = JPEG_RTP_MAX_PAYLOAD;
+        bool last = (offset + chunk >= data_len);
+
+        size_t pkt_total = RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE + chunk;
+
+        /* Byte rate budget check */
+        if (!rtp_tx_budget_check(pkt_total)) {
+            s_cam.rtp_pkts_dropped++;
+            return; /* Over budget — drop rest of frame */
+        }
+
+        uint8_t pkt[RTP_PKT_MAX_SIZE + RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE];
+
+        /* RTP header */
+        rtp_header_serialize(pkt, s_cam.rtp_seq++, s_cam.rtp_ts, s_cam.rtp_ssrc, last);
+        /* Override payload type to 26 (JPEG) */
+        pkt[1] = (last ? 0x80 : 0x00) | 26;
+
+        /* RFC 2435 JPEG header */
+        uint8_t *jhdr = pkt + RTP_HEADER_SIZE;
+        jhdr[0] = 0;                             /* Type-specific */
+        jhdr[1] = (offset >> 16) & 0xFF;         /* Fragment offset (MSB) */
+        jhdr[2] = (offset >> 8) & 0xFF;
+        jhdr[3] = offset & 0xFF;                 /* Fragment offset (LSB) */
+        jhdr[4] = 1;                             /* Type: 1 = YUV422 */
+        jhdr[5] = MJPEG_QUALITY;                 /* Q factor */
+        jhdr[6] = CAM_WIDTH / 8;                 /* Width / 8 */
+        jhdr[7] = CAM_HEIGHT / 8;                /* Height / 8 */
+
+        /* JPEG data payload */
+        memcpy(pkt + RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE, data + offset, chunk);
+
+        int ret = sendto(s_cam.rtp_sock, pkt, pkt_total, 0,
+                         (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
+        if (ret < 0) {
+            s_cam.rtp_pkts_dropped++;
+            if (errno == ENOMEM || errno == EAGAIN || errno == EWOULDBLOCK) {
+                s_cam.rtp_backoff_count++;
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            return;
+        }
+        s_cam.rtp_pkts_sent++;
+
+        offset += chunk;
+        vTaskDelay(pdMS_TO_TICKS(RTP_PACING_MS));
+    }
+}
+
+/* Legacy H.264 RTP sender (kept for reference, MJPEG is now primary) */
+static void rtp_send_h264_frame(const uint8_t *buf, size_t len);
 
 static void rtp_send_frame(const uint8_t *buf, size_t len)
 {
@@ -656,7 +799,13 @@ esp_err_t camera_h264_init(void)
     s_cam.h264_mutex = xSemaphoreCreateMutex();
 
     /* Allocate buffers */
+    /* YUV420 = 1.5 bytes/pixel, YUV422 = 2 bytes/pixel.
+     * When MJPEG is enabled and SDK lacks YUV420 JPEG input, ISP must output YUV422. */
+#if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
+    s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;     /* YUV422 = 2 bytes/pixel */
+#else
     s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2;  /* YUV420 = 1.5 bytes/pixel */
+#endif
     s_cam.raw_buf_size = (s_cam.raw_buf_size + 63) & ~63;  /* Cache line align */
 
     for (int i = 0; i < NUM_BUFS; i++) {
@@ -732,7 +881,11 @@ esp_err_t camera_h264_init(void)
         .v_res = CAM_HEIGHT,
         .lane_bit_rate_mbps = CSI_LANE_BITRATE_MBPS,
         .input_data_color_type = CAM_CTLR_COLOR_RAW8,
+#if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
+        .output_data_color_type = CAM_CTLR_COLOR_YUV422,
+#else
         .output_data_color_type = CAM_CTLR_COLOR_YUV420,
+#endif
         .data_lane_num = 2,
         .byte_swap_en = false,
         .queue_items = 1,
@@ -759,7 +912,11 @@ esp_err_t camera_h264_init(void)
         .clk_hz = 80 * 1000 * 1000,
         .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
         .input_data_color_type = ISP_COLOR_RAW8,
+#if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
+        .output_data_color_type = ISP_COLOR_YUV422,
+#else
         .output_data_color_type = ISP_COLOR_YUV420,
+#endif
         .has_line_start_packet = false,
         .has_line_end_packet = false,
         .h_res = CAM_WIDTH,
@@ -768,7 +925,11 @@ esp_err_t camera_h264_init(void)
     ret = esp_isp_new_processor(&isp_config, &isp_proc);
     if (ret == ESP_OK) {
         esp_isp_enable(isp_proc);
+#if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
+        ESP_LOGI(TAG, "ISP pipeline enabled (RAW8 → YUV422 for MJPEG)");
+#else
         ESP_LOGI(TAG, "ISP pipeline enabled (RAW8 → YUV420)");
+#endif
     }
 
     /* Start CSI capture */
@@ -784,17 +945,18 @@ esp_err_t camera_h264_init(void)
 #endif
 
 #if ENABLE_MJPEG && HAS_HW_JPEG
-    /* HW JPEG encoder (only when MJPEG streaming is enabled) */
-    jpeg_encode_engine_cfg_t jpeg_enc_cfg = { .timeout_ms = 100 };
+    /* HW JPEG encoder — primary encoder for MJPEG streaming */
+    jpeg_encode_engine_cfg_t jpeg_enc_cfg = { .timeout_ms = 200 };
     ret = jpeg_new_encoder_engine(&jpeg_enc_cfg, &s_cam.jpeg_handle);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "HW JPEG encoder initialized");
+        ESP_LOGI(TAG, "HW JPEG encoder initialized (quality=%d, MJPEG primary)", MJPEG_QUALITY);
     } else {
-        ESP_LOGW(TAG, "HW JPEG init failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "HW JPEG init failed: %s — falling back to H.264", esp_err_to_name(ret));
+        s_cam.jpeg_handle = NULL;
     }
 #endif
 
-    /* HW H.264 encoder */
+    /* HW H.264 encoder (fallback when MJPEG unavailable) */
 #if HAS_HW_H264
     esp_h264_enc_cfg_hw_t h264_cfg = {
         .gop = H264_GOP,
@@ -893,26 +1055,52 @@ static void camera_capture_task(void *arg)
         esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        /* === JPEG encode (for MJPEG HTTP stream, disabled by default) === */
+        /* === MJPEG encode → send via UDP RTP (Primary path) === */
         int64_t t2 = t1;
+        int64_t t4 = t1;
+        size_t h264_size_out = 0;
 #if ENABLE_MJPEG && HAS_HW_JPEG
-        {
-            size_t jpg_size_out = 0;
+        if (s_cam.jpeg_handle) {
             int wr_idx = s_cam.jpeg_write_idx;
+
+            /* Try YUV420 first (ESP-IDF v5.4+), fall back to YUV422 */
+#ifdef JPEG_ENCODE_IN_FORMAT_YUV420
             jpeg_encode_cfg_t jpeg_cfg = {
-                .src_type = JPEG_ENCODE_IN_FORMAT_YUV422,
-                .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
-                .image_quality = JPEG_QUALITY,
+                .src_type = JPEG_ENCODE_IN_FORMAT_YUV420,
+                .sub_sample = JPEG_DOWN_SAMPLING_YUV420,
+                .image_quality = MJPEG_QUALITY,
                 .width = CAM_WIDTH,
                 .height = CAM_HEIGHT,
             };
+#else
+            jpeg_encode_cfg_t jpeg_cfg = {
+                .src_type = JPEG_ENCODE_IN_FORMAT_YUV422,
+                .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
+                .image_quality = MJPEG_QUALITY,
+                .width = CAM_WIDTH,
+                .height = CAM_HEIGHT,
+            };
+#endif
 
             uint32_t jpg_size = 0;
             esp_err_t ret = jpeg_encoder_process(s_cam.jpeg_handle, &jpeg_cfg,
                                                   frame_data, s_cam.raw_buf_size,
                                                   s_cam.jpeg_buf[wr_idx], JPEG_BUF_SIZE,
                                                   &jpg_size);
+            t4 = esp_timer_get_time();
+
             if (ret == ESP_OK && jpg_size > 0) {
+                h264_size_out = jpg_size; /* Reuse stat counter for encoded bytes */
+
+                /* Sync cache: JPEG encoder wrote to PSRAM */
+                esp_cache_msync(s_cam.jpeg_buf[wr_idx],
+                                (jpg_size + 63) & ~63,
+                                ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+
+                /* Send via UDP RTP (Primary, Low Latency) */
+                rtp_send_jpeg_frame(s_cam.jpeg_buf[wr_idx], jpg_size);
+
+                /* Update MJPEG HTTP double buffer */
                 if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                     s_cam.jpeg_size[wr_idx] = jpg_size;
                     s_cam.jpeg_write_idx = (wr_idx + 1) % NUM_BUFS;
@@ -920,57 +1108,51 @@ static void camera_capture_task(void *arg)
                     xSemaphoreGive(s_cam.jpeg_mutex);
                 }
                 xSemaphoreGive(s_cam.frame_ready);
-                jpg_size_out = jpg_size;
+            } else if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
             }
         }
-        t2 = esp_timer_get_time();
+        /* Fallback: H.264 encode if MJPEG handle not available */
+        else
+#elif HAS_HW_H264
+        /* H.264 only path (when MJPEG disabled) */
 #endif
-
-        /* === H.264 encode → send via UDP RTP === */
-        int64_t t4 = t2;
-        size_t h264_size_out = 0;
+        {
 #if HAS_HW_H264
-        if (s_cam.h264_handle) {
-            /* ISP outputs YUV420 (O_UYY_E_VYY) directly — no conversion needed */
+            if (s_cam.h264_handle) {
+                esp_h264_enc_in_frame_t in_frame = {
+                    .raw_data = { .buffer = frame_data },
+                };
+                in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
 
-            /* HW H.264 encode */
-            esp_h264_enc_in_frame_t in_frame = {
-                .raw_data = { .buffer = frame_data },
-            };
-            in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
+                esp_h264_enc_out_frame_t out_frame = {
+                    .raw_data = {
+                        .buffer = s_cam.h264_buf,
+                        .len = H264_BUF_SIZE,
+                    },
+                };
 
-            esp_h264_enc_out_frame_t out_frame = {
-                .raw_data = {
-                    .buffer = s_cam.h264_buf,
-                    .len = H264_BUF_SIZE,
-                },
-            };
+                esp_h264_err_t h264_ret = esp_h264_enc_process(s_cam.h264_handle,
+                                                                &in_frame, &out_frame);
+                t4 = esp_timer_get_time();
 
-            esp_h264_err_t h264_ret = esp_h264_enc_process(s_cam.h264_handle,
-                                                            &in_frame, &out_frame);
-            t4 = esp_timer_get_time();
+                if (h264_ret == ESP_H264_ERR_OK && out_frame.length > 0) {
+                    h264_size_out = out_frame.length;
+                    esp_cache_msync(s_cam.h264_buf,
+                                    (out_frame.length + 63) & ~63,
+                                    ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+                    rtp_send_frame(s_cam.h264_buf, out_frame.length);
 
-            if (h264_ret == ESP_H264_ERR_OK && out_frame.length > 0) {
-                h264_size_out = out_frame.length;
-
-                /* Sync cache: H.264 encoder wrote to PSRAM, CPU needs to read */
-                esp_cache_msync(s_cam.h264_buf,
-                                (out_frame.length + 63) & ~63,
-                                ESP_CACHE_MSYNC_FLAG_DIR_M2C);
-
-                /* 1. Send via UDP RTP (Primary, Low Latency) */
-                rtp_send_frame(s_cam.h264_buf, out_frame.length);
-
-                /* 2. Copy H.264 frame for HTTP client (Backup/Debug) */
-                if (xSemaphoreTake(s_cam.h264_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    memcpy(s_cam.h264_send_buf, s_cam.h264_buf, out_frame.length);
-                    s_cam.h264_send_size = out_frame.length;
-                    xSemaphoreGive(s_cam.h264_mutex);
-                    xSemaphoreGive(s_cam.h264_ready);
+                    if (xSemaphoreTake(s_cam.h264_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        memcpy(s_cam.h264_send_buf, s_cam.h264_buf, out_frame.length);
+                        s_cam.h264_send_size = out_frame.length;
+                        xSemaphoreGive(s_cam.h264_mutex);
+                        xSemaphoreGive(s_cam.h264_ready);
+                    }
                 }
             }
-        }
 #endif
+        }
 
         /* Update FPS stats */
         s_cam.frame_count++;
@@ -990,7 +1172,7 @@ static void camera_capture_task(void *arg)
 
         if ((now - last_log_us) > 5000000) {
             if (stat_frames > 0) {
-                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms h264=%ldms total=%ldms | h264=%luKB | http=%d",
+                ESP_LOGI(TAG, "[perf] %ld frames: wait=%ldms enc=%ldms total=%ldms | enc=%luKB | http=%d",
                          (long)stat_frames,
                          (long)(stat_wait_us / stat_frames / 1000),
                          (long)(stat_h264_us / stat_frames / 1000),
@@ -1031,15 +1213,13 @@ static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 
 static esp_err_t stream_handler(httpd_req_t *req)
 {
-    /* MJPEG disabled (ISP outputs YUV420, HW JPEG encoder only accepts YUV422) */
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req,
         "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:40px'>"
         "<h2>ESP32-P4 Helicopter</h2>"
-        "<p><a href='/video' style='color:#0af;font-size:20px'>H.264 Video (HTTP backup)</a></p>"
-        "<p style='color:#888;font-size:14px'>Primary: UDP RTP on port 5600 (auto-detect GCS IP)</p>"
-        "<p><a href='/stream.sdp' style='color:#0af;font-size:16px'>stream.sdp</a> — open in VLC for H.264 RTP</p>"
+        "<p style='color:#888;font-size:14px'>Primary: MJPEG RTP on port 5600 (RFC 2435)</p>"
+        "<p><a href='/stream.sdp' style='color:#0af;font-size:16px'>stream.sdp</a> — open in VLC</p>"
         "<p><a href='/thermal' style='color:#0af;font-size:20px'>Thermal Camera</a></p>"
         "<p><a href='/status' style='color:#0af;font-size:20px'>System Status</a></p>"
         "</body></html>", HTTPD_RESP_USE_STRLEN);
@@ -1096,8 +1276,21 @@ static esp_err_t status_handler(httpd_req_t *req)
  */
 static esp_err_t sdp_handler(httpd_req_t *req)
 {
-    /* Get the client's IP so we can put the correct connection address */
     char sdp[512];
+#if ENABLE_MJPEG
+    /* MJPEG RTP: payload type 26 (JPEG), RFC 2435 */
+    snprintf(sdp, sizeof(sdp),
+        "v=0\r\n"
+        "o=- 0 0 IN IP4 0.0.0.0\r\n"
+        "s=ESP32-P4 MJPEG\r\n"
+        "c=IN IP4 0.0.0.0\r\n"
+        "t=0 0\r\n"
+        "m=video %d RTP/AVP 26\r\n"
+        "a=rtpmap:26 JPEG/90000\r\n"
+        "a=framerate:%d\r\n",
+        RTP_PORT, MJPEG_FPS);
+#else
+    /* H.264 RTP: dynamic payload type 96 */
     snprintf(sdp, sizeof(sdp),
         "v=0\r\n"
         "o=- 0 0 IN IP4 0.0.0.0\r\n"
@@ -1112,6 +1305,7 @@ static esp_err_t sdp_handler(httpd_req_t *req)
         RTP_PAYLOAD_TYPE,
         RTP_PAYLOAD_TYPE,
         H264_FPS);
+#endif
 
     httpd_resp_set_type(req, "application/sdp");
     httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"stream.sdp\"");
@@ -1387,7 +1581,7 @@ httpd_handle_t camera_stream_server_start(void)
         httpd_register_uri_handler(server, &uri_thermal);
         httpd_register_uri_handler(server, &uri_thermal_raw);
         ESP_LOGI(TAG, "HTTP server started");
-        ESP_LOGI(TAG, "  H.264:   rtp://@:5600 (primary) + http://<ip>/video (backup, %d fps)", STREAM_TARGET_FPS);
+        ESP_LOGI(TAG, "  Video:   MJPEG RTP on port 5600 (RFC 2435, %d fps, Q=%d)", MJPEG_FPS, MJPEG_QUALITY);
         ESP_LOGI(TAG, "  SDP:     http://<ip>/stream.sdp (open in VLC)");
         ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser)");
         ESP_LOGI(TAG, "  Status:  http://<ip>/status");
