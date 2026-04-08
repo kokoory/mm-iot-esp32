@@ -324,23 +324,131 @@ static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
     s_cam.rtp_pkts_sent++;
 }
 
-/* ========== MJPEG RTP Sender ========== */
+/* ========== MJPEG RTP Sender (RFC 2435) ========== */
 
-/**
- * Send a JPEG frame over RTP using RFC 2435 framing.
- * Each JPEG is fragmented into RTP packets with a JPEG-specific header.
- * This produces smooth, constant-rate traffic (no I-frame burst).
+/*
+ * RFC 2435 RTP JPEG framing.
  *
- * RFC 2435 JPEG header (8 bytes):
+ * Main JPEG header (8 bytes, every packet):
  *   0:     Type-specific (0)
  *   1-3:   Fragment offset (24-bit big-endian)
- *   4:     Type (1 = JPEG YUV422, 0 = YUV420)
- *   5:     Q (quality factor, >= 128 means custom tables follow)
+ *   4:     Type (0 = YUV420, 1 = YUV422)
+ *   5:     Q factor (>= 128 means quantization tables in first packet)
  *   6:     Width / 8
  *   7:     Height / 8
+ *
+ * Quantization Table Header (first packet only, when Q >= 128):
+ *   0:     MBZ (0)
+ *   1:     Precision (0 = 8-bit)
+ *   2-3:   Length of table data (big-endian)
+ *   4+:    Raw quantization table values (64 bytes per table)
+ *
+ * The scan data (entropy-coded) is sent as the payload. VLC/gstreamer
+ * depayloaders reconstruct a full JPEG from the Q tables + scan data.
+ * DQT/DHT/SOF/SOS headers from the original JPEG are NOT sent — the
+ * receiver generates them.
  */
 #define JPEG_RTP_HEADER_SIZE  8
+#define JPEG_RTP_QT_HDR_SIZE  4   /* MBZ + Precision + Length(2) */
+#define JPEG_QUANT_TBL_SIZE   64  /* 8-bit precision quant table */
+#define JPEG_MAX_QUANT_TBLS   4
+#define JPEG_RTP_Q_VALUE      255 /* Q >= 128: quant tables in header */
+
+/* Max scan data per RTP packet (varies for first packet due to QT header) */
 #define JPEG_RTP_MAX_PAYLOAD  (RTP_PKT_MAX_SIZE - JPEG_RTP_HEADER_SIZE)
+
+/* Parsed JPEG information for RFC 2435 framing */
+typedef struct {
+    uint8_t  tables[JPEG_MAX_QUANT_TBLS][JPEG_QUANT_TBL_SIZE];
+    uint8_t  num_tables;           /* Number of quant tables found */
+    uint8_t  type;                 /* 0=YUV420, 1=YUV422 (from SOF) */
+    const uint8_t *scan_data;      /* Entropy-coded data (after SOS header) */
+    size_t   scan_len;             /* Length of scan data (excludes EOI) */
+} jpeg_rtp_parse_t;
+
+/**
+ * Parse a JPEG produced by the ESP32 HW encoder to extract:
+ *   - Quantization tables (from DQT markers)
+ *   - Subsampling type (from SOF marker)
+ *   - Pointer to entropy-coded scan data (after SOS header)
+ *
+ * These are needed for proper RFC 2435 framing where the receiver
+ * reconstructs JPEG headers from the RTP metadata.
+ */
+static bool jpeg_parse_for_rtp(const uint8_t *jpeg, size_t len,
+                                jpeg_rtp_parse_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    const uint8_t *p = jpeg;
+    const uint8_t *end = jpeg + len;
+
+    /* Skip SOI (FF D8) */
+    if (p + 2 <= end && p[0] == 0xFF && p[1] == 0xD8)
+        p += 2;
+
+    while (p + 2 <= end) {
+        if (p[0] != 0xFF) { p++; continue; }
+        /* Skip padding FF bytes */
+        while (p + 1 < end && p[1] == 0xFF) p++;
+        if (p + 2 > end) break;
+
+        uint8_t marker = p[1];
+        p += 2;
+
+        if (marker == 0xD9) break; /* EOI */
+        if (marker == 0x00) continue; /* Byte stuffing */
+        if (marker >= 0xD0 && marker <= 0xD7) continue; /* RST */
+
+        /* All other markers have a 2-byte length */
+        if (p + 2 > end) break;
+        uint16_t seg_len = (p[0] << 8) | p[1];
+        if (seg_len < 2 || p + seg_len > end) break;
+
+        switch (marker) {
+        case 0xDB: { /* DQT — extract quantization tables */
+            const uint8_t *q = p + 2;
+            const uint8_t *q_end = p + seg_len;
+            while (q + 1 + JPEG_QUANT_TBL_SIZE <= q_end) {
+                uint8_t pq = (*q >> 4) & 0x0F; /* Precision */
+                uint8_t tq = *q & 0x0F;         /* Table ID */
+                q++;
+                if (pq != 0) { q += 128; continue; } /* Skip 16-bit tables */
+                if (tq < JPEG_MAX_QUANT_TBLS) {
+                    memcpy(out->tables[tq], q, JPEG_QUANT_TBL_SIZE);
+                    if (tq >= out->num_tables) out->num_tables = tq + 1;
+                }
+                q += JPEG_QUANT_TBL_SIZE;
+            }
+            break;
+        }
+        case 0xC0: /* SOF0 (Baseline DCT) */
+        case 0xC1: { /* SOF1 */
+            /* p[2]=precision, p[3-4]=height, p[5-6]=width, p[7]=Nf */
+            if (seg_len >= 9) {
+                uint8_t hv = p[9]; /* Y component sampling factors (H:V) */
+                uint8_t v_samp = hv & 0x0F;
+                out->type = (v_samp <= 1) ? 1 : 0; /* V=1→YUV422, V=2→YUV420 */
+            }
+            break;
+        }
+        case 0xDA: { /* SOS — scan data follows */
+            out->scan_data = p + seg_len;
+            out->scan_len = end - out->scan_data;
+            /* Strip trailing EOI (FF D9) */
+            if (out->scan_len >= 2 &&
+                out->scan_data[out->scan_len - 2] == 0xFF &&
+                out->scan_data[out->scan_len - 1] == 0xD9) {
+                out->scan_len -= 2;
+            }
+            return (out->num_tables >= 2 && out->scan_len > 0);
+        }
+        }
+
+        p += seg_len;
+    }
+
+    return false;
+}
 
 static void rtp_send_jpeg_frame(const uint8_t *jpeg_data, size_t jpeg_len)
 {
@@ -374,12 +482,10 @@ static void rtp_send_jpeg_frame(const uint8_t *jpeg_data, size_t jpeg_len)
     if (cur_pause > s_cam.last_pause_count) {
         uint32_t delta = cur_pause - s_cam.last_pause_count;
         if (delta >= 3) {
-            /* Significant burst — skip 1 frame per 3 pauses */
             s_cam.skip_frames = delta / 3;
             ESP_LOGW(TAG, "[rtp] congestion: %lu pauses, skip %d frames",
                      (unsigned long)delta, s_cam.skip_frames);
         }
-        /* Always update baseline to prevent accumulation */
     }
     s_cam.last_pause_count = cur_pause;
 
@@ -391,25 +497,26 @@ static void rtp_send_jpeg_frame(const uint8_t *jpeg_data, size_t jpeg_len)
                  inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
     }
 
+    /* Parse JPEG to extract quant tables and scan data for RFC 2435 */
+    jpeg_rtp_parse_t jinfo;
+    if (!jpeg_parse_for_rtp(jpeg_data, jpeg_len, &jinfo)) {
+        ESP_LOGW(TAG, "[rtp] JPEG parse failed (len=%u), dropping frame",
+                 (unsigned)jpeg_len);
+        s_cam.rtp_frames_skipped++;
+        return;
+    }
+
     s_cam.rtp_frames_sent++;
-
-    /* Skip the JPEG SOI (FF D8) and EOI (FF D9) markers for RFC 2435.
-     * Receivers reconstruct them from the RTP JPEG header. */
-    const uint8_t *data = jpeg_data;
-    size_t data_len = jpeg_len;
-
-    /* Skip SOI marker (0xFFD8) if present */
-    if (data_len >= 2 && data[0] == 0xFF && data[1] == 0xD8) {
-        data += 2;
-        data_len -= 2;
-    }
-    /* Strip EOI marker (0xFFD9) if present */
-    if (data_len >= 2 && data[data_len - 2] == 0xFF && data[data_len - 1] == 0xD9) {
-        data_len -= 2;
-    }
 
     /* RTP timestamp: 90kHz clock */
     s_cam.rtp_ts += (90000 / MJPEG_FPS);
+
+    /* Quantization table data: num_tables × 64 bytes each */
+    uint16_t qt_data_len = jinfo.num_tables * JPEG_QUANT_TBL_SIZE;
+    size_t qt_hdr_total = JPEG_RTP_QT_HDR_SIZE + qt_data_len;
+
+    const uint8_t *data = jinfo.scan_data;
+    size_t data_len = jinfo.scan_len;
 
     uint32_t offset = 0;
     while (offset < data_len) {
@@ -418,14 +525,18 @@ static void rtp_send_jpeg_frame(const uint8_t *jpeg_data, size_t jpeg_len)
             s_cam.rtp_pkts_dropped++;
             s_cam.rtp_backoff_count++;
             vTaskDelay(pdMS_TO_TICKS(20));
-            return; /* Abort frame — MJPEG frames are independent, no corruption */
+            return; /* Abort frame — MJPEG frames are independent */
         }
 
+        bool is_first = (offset == 0);
+        size_t extra = is_first ? qt_hdr_total : 0;
+        size_t max_chunk = JPEG_RTP_MAX_PAYLOAD - extra;
+
         size_t chunk = data_len - offset;
-        if (chunk > JPEG_RTP_MAX_PAYLOAD) chunk = JPEG_RTP_MAX_PAYLOAD;
+        if (chunk > max_chunk) chunk = max_chunk;
         bool last = (offset + chunk >= data_len);
 
-        size_t pkt_total = RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE + chunk;
+        size_t pkt_total = RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE + extra + chunk;
 
         /* Byte rate budget check */
         if (!rtp_tx_budget_check(pkt_total)) {
@@ -433,26 +544,41 @@ static void rtp_send_jpeg_frame(const uint8_t *jpeg_data, size_t jpeg_len)
             return; /* Over budget — drop rest of frame */
         }
 
-        uint8_t pkt[RTP_PKT_MAX_SIZE + RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE];
+        /* Stack buffer: RTP(12) + JPEG(8) + QT(4+128) + scan(~1060) ≈ 1212 max */
+        uint8_t pkt[RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE + 140 + RTP_PKT_MAX_SIZE];
 
-        /* RTP header */
+        /* RTP header — payload type 26 (JPEG) */
         rtp_header_serialize(pkt, s_cam.rtp_seq++, s_cam.rtp_ts, s_cam.rtp_ssrc, last);
-        /* Override payload type to 26 (JPEG) */
         pkt[1] = (last ? 0x80 : 0x00) | 26;
 
-        /* RFC 2435 JPEG header */
+        /* RFC 2435 main JPEG header (8 bytes) */
         uint8_t *jhdr = pkt + RTP_HEADER_SIZE;
-        jhdr[0] = 0;                             /* Type-specific */
-        jhdr[1] = (offset >> 16) & 0xFF;         /* Fragment offset (MSB) */
+        jhdr[0] = 0;                                /* Type-specific */
+        jhdr[1] = (offset >> 16) & 0xFF;             /* Fragment offset (MSB) */
         jhdr[2] = (offset >> 8) & 0xFF;
-        jhdr[3] = offset & 0xFF;                 /* Fragment offset (LSB) */
-        jhdr[4] = 1;                             /* Type: 1 = YUV422 */
-        jhdr[5] = MJPEG_QUALITY;                 /* Q factor */
-        jhdr[6] = CAM_WIDTH / 8;                 /* Width / 8 */
-        jhdr[7] = CAM_HEIGHT / 8;                /* Height / 8 */
+        jhdr[3] = offset & 0xFF;                     /* Fragment offset (LSB) */
+        jhdr[4] = jinfo.type;                        /* 0=YUV420, 1=YUV422 */
+        jhdr[5] = JPEG_RTP_Q_VALUE;                  /* Q=255: tables in header */
+        jhdr[6] = CAM_WIDTH / 8;                     /* Width / 8 */
+        jhdr[7] = CAM_HEIGHT / 8;                    /* Height / 8 */
 
-        /* JPEG data payload */
-        memcpy(pkt + RTP_HEADER_SIZE + JPEG_RTP_HEADER_SIZE, data + offset, chunk);
+        uint8_t *wp = jhdr + JPEG_RTP_HEADER_SIZE;
+
+        /* First packet: include Quantization Table Header (RFC 2435 §3.1.8) */
+        if (is_first) {
+            wp[0] = 0;                               /* MBZ */
+            wp[1] = 0;                               /* Precision: 0 = 8-bit */
+            wp[2] = (qt_data_len >> 8) & 0xFF;       /* Length MSB */
+            wp[3] = qt_data_len & 0xFF;               /* Length LSB */
+            for (int t = 0; t < jinfo.num_tables; t++) {
+                memcpy(wp + JPEG_RTP_QT_HDR_SIZE + t * JPEG_QUANT_TBL_SIZE,
+                       jinfo.tables[t], JPEG_QUANT_TBL_SIZE);
+            }
+            wp += qt_hdr_total;
+        }
+
+        /* Entropy-coded scan data */
+        memcpy(wp, data + offset, chunk);
 
         int ret = sendto(s_cam.rtp_sock, pkt, pkt_total, 0,
                          (struct sockaddr *)&s_cam.rtp_dest_addr, sizeof(s_cam.rtp_dest_addr));
