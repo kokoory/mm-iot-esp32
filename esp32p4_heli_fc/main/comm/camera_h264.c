@@ -78,8 +78,8 @@ static const char *TAG = "camera_h264";
 #define H264_BUF_SIZE       (100 * 1024)
 
 /* MJPEG encoder settings (primary — no I-frame burst, smooth SPI traffic) */
-#define MJPEG_QUALITY       40           /* JPEG quality 1-100 (40 ≈ 10-15KB per frame at 800x640) */
-#define MJPEG_FPS           7            /* Target FPS */
+#define MJPEG_QUALITY       15           /* JPEG quality 1-100 (15 ≈ 8-12KB per frame at 800x640) */
+#define MJPEG_FPS           5            /* Target FPS — must fit within ~60KB/s effective throughput */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
 #define RTP_PORT            5600
@@ -355,20 +355,31 @@ static void rtp_send_jpeg_frame(const uint8_t *jpeg_data, size_t jpeg_len)
         return;
     }
 
-    /* Adaptive frame skip: back off when TX pool is congested */
+    /* Skip if TX pool is currently saturated — don't even start the frame */
+    if (app_wlan_tx_is_paused()) {
+        s_cam.rtp_frames_skipped++;
+        return;
+    }
+
+    /* Adaptive frame skip: back off when TX pool is congested.
+     * Only react to significant pause bursts (>=3 new pauses since last send)
+     * to avoid cascade where every single pause starves the stream. */
     if (s_cam.skip_frames > 0) {
         s_cam.skip_frames--;
         s_cam.rtp_frames_skipped++;
         return;
     }
 
-    /* Check if TX pool congestion increased */
     uint32_t cur_pause = app_wlan_tx_pause_count();
     if (cur_pause > s_cam.last_pause_count) {
         uint32_t delta = cur_pause - s_cam.last_pause_count;
-        s_cam.skip_frames = delta * 2;
-        ESP_LOGW(TAG, "[rtp] congestion: %lu new pauses, skip %d frames",
-                 (unsigned long)delta, s_cam.skip_frames);
+        if (delta >= 3) {
+            /* Significant burst — skip 1 frame per 3 pauses */
+            s_cam.skip_frames = delta / 3;
+            ESP_LOGW(TAG, "[rtp] congestion: %lu pauses, skip %d frames",
+                     (unsigned long)delta, s_cam.skip_frames);
+        }
+        /* Always update baseline to prevent accumulation */
     }
     s_cam.last_pause_count = cur_pause;
 
@@ -507,10 +518,12 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
     uint32_t cur_pause = app_wlan_tx_pause_count();
     if (cur_pause > s_cam.last_pause_count) {
         uint32_t delta = cur_pause - s_cam.last_pause_count;
-        /* Skip next 2 P-frames per new pause event (I-frames still pass) */
-        s_cam.skip_frames = delta * 2;
-        ESP_LOGW(TAG, "[rtp] congestion: %lu new pauses, skip %d P-frames",
-                 (unsigned long)delta, s_cam.skip_frames);
+        if (delta >= 3) {
+            /* Significant burst — skip 1 P-frame per 3 pauses */
+            s_cam.skip_frames = delta / 3;
+            ESP_LOGW(TAG, "[rtp] congestion: %lu pauses, skip %d P-frames",
+                     (unsigned long)delta, s_cam.skip_frames);
+        }
     }
     s_cam.last_pause_count = cur_pause;
 
