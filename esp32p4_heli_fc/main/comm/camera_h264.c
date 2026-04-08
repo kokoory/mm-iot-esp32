@@ -70,11 +70,11 @@ static const char *TAG = "camera_h264";
 #define JPEG_BUF_SIZE       (100 * 1024) /* 100KB for low-quality 800x640 */
 
 /* H.264 encoder settings */
-#define H264_GOP            10           /* Reduced from 60 to 10 for faster recovery on HaLow loss */
+#define H264_GOP            25           /* I-frame every 5 sec (was 10) — reduces I-frame flood frequency */
 #define H264_FPS            5            /* Encode at 5fps for HaLow bandwidth */
-#define H264_QP_MIN         36           /* Force higher compression (was 32) */
-#define H264_QP_MAX         48           /* Aggressive compression for HaLow */
-#define H264_BITRATE        100000       /* 100 Kbps target (was 150K — encoder overshot to 300K+) */
+#define H264_QP_MIN         30           /* Allow decent quality (was 36) */
+#define H264_QP_MAX         44           /* Still aggressive for HaLow (was 48) */
+#define H264_BITRATE        250000       /* 250 Kbps target — 60% of ~400kbps usable (was 100K — too low for 800x640) */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
@@ -82,8 +82,9 @@ static const char *TAG = "camera_h264";
 #define RTP_PKT_MAX_SIZE    1200         /* Small packets for HaLow stability */
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
-#define RTP_PACING_MS       5            /* Delay between packets to avoid TX queue overflow */
-#define RTP_MAX_FRAME_BYTES 8000         /* Skip frames larger than 8KB to prevent TX flooding */
+#define RTP_PACING_MS       3            /* Base pacing for P-frames (was 5) */
+#define RTP_PACING_I_MS     8            /* Pacing for I-frame packets (spread burst) */
+#define RTP_MAX_P_FRAME     6000         /* Skip P-frames larger than 6KB */
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
@@ -271,29 +272,40 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
         return;
     }
 
-    /* Adaptive frame skip: back off when TX pool is congested */
-    if (s_cam.skip_frames > 0) {
+    /* Detect if this frame contains an I-frame (IDR NAL type 5 or SPS type 7) */
+    bool has_idr = false;
+    for (size_t i = 0; i + 4 < len; i++) {
+        if (buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 0 && buf[i+3] == 1) {
+            uint8_t nal_type = buf[i+4] & 0x1F;
+            if (nal_type == 5 || nal_type == 7) { /* IDR slice or SPS */
+                has_idr = true;
+                break;
+            }
+        }
+    }
+
+    /* Adaptive frame skip: back off when TX pool is congested.
+     * NEVER skip I-frames — without them the decoder can't recover. */
+    if (s_cam.skip_frames > 0 && !has_idr) {
         s_cam.skip_frames--;
         s_cam.rtp_frames_skipped++;
         return;
     }
+    s_cam.skip_frames = 0; /* Reset skip counter when I-frame arrives or skip exhausted */
 
-    /* Drop oversized frames (large I-frames that would flood TX pool) */
-    if (len > RTP_MAX_FRAME_BYTES) {
+    /* Size limit: only skip oversized P-frames. I-frames are ALWAYS sent. */
+    if (!has_idr && len > RTP_MAX_P_FRAME) {
         s_cam.rtp_frames_skipped++;
-        ESP_LOGW(TAG, "[rtp] frame too large: %u bytes > %d limit, skipping",
-                 (unsigned)len, RTP_MAX_FRAME_BYTES);
         return;
     }
 
-    /* Check if TX pool congestion increased — trigger adaptive backoff */
+    /* Check if TX pool congestion increased — trigger adaptive backoff (P-frames only) */
     uint32_t cur_pause = app_wlan_tx_pause_count();
     if (cur_pause > s_cam.last_pause_count) {
         uint32_t delta = cur_pause - s_cam.last_pause_count;
-        /* Skip 2 frames per new pause event (gives HaLow time to drain) */
+        /* Skip next 2 P-frames per new pause event (I-frames still pass) */
         s_cam.skip_frames = delta * 2;
-        s_cam.need_idr = true;
-        ESP_LOGW(TAG, "[rtp] congestion: %lu new pauses, skipping %d frames",
+        ESP_LOGW(TAG, "[rtp] congestion: %lu new pauses, skip %d P-frames",
                  (unsigned long)delta, s_cam.skip_frames);
     }
     s_cam.last_pause_count = cur_pause;
@@ -310,8 +322,9 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
 
     /* Debug: log first few frames to verify Annex-B format */
     if (s_cam.rtp_frames_sent <= 3) {
-        ESP_LOGI(TAG, "[rtp-debug] frame #%lu len=%u bytes[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x",
+        ESP_LOGI(TAG, "[rtp-debug] frame #%lu len=%u %s bytes[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x",
                  (unsigned long)s_cam.rtp_frames_sent, (unsigned)len,
+                 has_idr ? "IDR" : "P",
                  len > 0 ? buf[0] : 0, len > 1 ? buf[1] : 0,
                  len > 2 ? buf[2] : 0, len > 3 ? buf[3] : 0,
                  len > 4 ? buf[4] : 0, len > 5 ? buf[5] : 0,
@@ -321,10 +334,8 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
 
-    /* Dynamic pacing: larger frames get more delay between packets
-     * to avoid bursting the TX pool. Small frames (<2KB): 5ms, large (8KB): ~10ms */
-    int pacing_ms = RTP_PACING_MS + (int)(len / 2000);
-    if (pacing_ms > 15) pacing_ms = 15;
+    /* NAL-type aware pacing: I-frames get more spacing to avoid TX burst */
+    int pacing_ms = has_idr ? RTP_PACING_I_MS : RTP_PACING_MS;
 
     /* Standard RTP timestamp: 90kHz clock for H.264 */
     s_cam.rtp_ts += (90000 / H264_FPS);
@@ -368,15 +379,22 @@ static void rtp_send_frame(const uint8_t *buf, size_t len)
 
             while (payload_len > 0) {
                 /* Check TX flow control for each fragment.
-                 * If paused mid-NAL, skip remaining fragments AND remaining NALs
-                 * to avoid sending partial FU-A sequences that corrupt the decoder. */
+                 * For I-frames: WAIT until TX unpauses (never abort I-frame)
+                 * For P-frames: abort to avoid partial FU-A corruption */
                 if (app_wlan_tx_is_paused()) {
-                    s_cam.rtp_pkts_dropped++;
-                    s_cam.rtp_backoff_count++;
-                    s_cam.skip_frames = 2; /* Skip next 2 frames to let TX drain */
-                    s_cam.need_idr = true;
-                    vTaskDelay(pdMS_TO_TICKS(20));
-                    return; /* Abort entire frame — partial FU-A is undecodable */
+                    if (has_idr) {
+                        /* I-frame: wait for TX pool to drain, then continue */
+                        while (app_wlan_tx_is_paused()) {
+                            vTaskDelay(pdMS_TO_TICKS(10));
+                        }
+                    } else {
+                        /* P-frame: abort — partial FU-A is undecodable */
+                        s_cam.rtp_pkts_dropped++;
+                        s_cam.rtp_backoff_count++;
+                        s_cam.skip_frames = 2;
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                        return;
+                    }
                 }
 
                 size_t chunk = (payload_len > (RTP_PKT_MAX_SIZE - 2)) ? (RTP_PKT_MAX_SIZE - 2) : payload_len;
