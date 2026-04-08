@@ -52,6 +52,7 @@ uint8_t mavlink_get_crc_extra(uint32_t msgid)
     case MAVLINK_MSG_ID_HIGHRES_IMU:         return 93;
     case MAVLINK_MSG_ID_LOCAL_POSITION_NED:  return 185;
     case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL: return 84;
+    case MAVLINK_MSG_ID_PROTOCOL_VERSION:    return 217;
     default:                                 return 0;
     }
 }
@@ -1315,6 +1316,29 @@ void mavlink_msg_file_transfer_protocol_encode(mavlink_message_t *msg,
         uint8_t copy_len = (payload_len > 251) ? 251 : payload_len;
         memcpy(&msg->payload[3], payload, copy_len);
     }
+    mavlink_finalize(msg);
+}
+
+/* ── Protocol Version (ID 300) ───────────────────────────────── *
+ * Payload layout (22 bytes):
+ *   0-1:   version (uint16)        - current MAVLink version * 100
+ *   2-3:   min_version (uint16)    - minimum supported version * 100
+ *   4-5:   max_version (uint16)    - maximum supported version * 100
+ *   6-13:  spec_version_hash (uint8[8])
+ *   14-21: library_version_hash (uint8[8])
+ */
+void mavlink_msg_protocol_version_encode(mavlink_message_t *msg,
+                                         uint16_t version,
+                                         uint16_t min_version,
+                                         uint16_t max_version)
+{
+    msg_init(msg, MAVLINK_MSG_ID_PROTOCOL_VERSION);
+    msg->len = 22;
+    memset(msg->payload, 0, 22);
+    put_u16(msg->payload, 0, version);
+    put_u16(msg->payload, 2, min_version);
+    put_u16(msg->payload, 4, max_version);
+    /* spec_version_hash and library_version_hash left as zeros */
     mavlink_finalize(msg);
 }
 

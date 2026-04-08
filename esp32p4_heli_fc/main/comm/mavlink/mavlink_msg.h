@@ -325,6 +325,13 @@ void mavlink_msg_local_position_ned_encode(mavlink_message_t *msg,
                                            float x, float y, float z,
                                            float vx, float vy, float vz);
 
+/* ── Protocol Version (ID 300) ───────────────────────────────── */
+
+void mavlink_msg_protocol_version_encode(mavlink_message_t *msg,
+                                         uint16_t version,
+                                         uint16_t min_version,
+                                         uint16_t max_version);
+
 /* ── File Transfer Protocol (ID 110) ─────────────────────────── */
 
 void mavlink_msg_file_transfer_protocol_encode(mavlink_message_t *msg,

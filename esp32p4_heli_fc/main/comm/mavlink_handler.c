@@ -317,9 +317,19 @@ static uint32_t s_tx_budget_window_start = 0;
 
 /* Forward declarations */
 static void send_mission_current(void);
+static void send_protocol_version(void);
 static void send_autopilot_version(void);
 
-static void send_mavlink_msg(mavlink_message_t *msg)
+/* Check if a message ID is a critical response that must not be dropped */
+static bool is_critical_msg(uint32_t msgid)
+{
+    return msgid == MAVLINK_MSG_ID_HEARTBEAT       /* ID 0 */
+        || msgid == MAVLINK_MSG_ID_COMMAND_ACK     /* ID 77 */
+        || msgid == MAVLINK_MSG_ID_PARAM_VALUE     /* ID 22 */
+        || msgid == MAVLINK_MSG_ID_AUTOPILOT_VERSION; /* ID 148 */
+}
+
+static bool send_mavlink_msg(mavlink_message_t *msg)
 {
     uint32_t now = get_time_ms();
 
@@ -329,14 +339,16 @@ static void send_mavlink_msg(mavlink_message_t *msg)
         s_tx_budget_window_start = now;
     }
 
-    /* Drop non-critical telemetry when budget exhausted (always allow heartbeat) */
-    if (s_tx_budget_count >= TX_BUDGET_MAX_PER_SEC && msg->msgid != 0 /* HEARTBEAT */) {
-        return;
+    bool critical = is_critical_msg(msg->msgid);
+
+    /* Drop non-critical telemetry when budget exhausted */
+    if (s_tx_budget_count >= TX_BUDGET_MAX_PER_SEC && !critical) {
+        return false;
     }
 
-    /* Skip non-heartbeat when HaLow TX pool is congested */
-    if (app_wlan_tx_is_paused() && msg->msgid != 0 /* HEARTBEAT */) {
-        return;
+    /* Skip non-critical when HaLow TX pool is congested */
+    if (app_wlan_tx_is_paused() && !critical) {
+        return false;
     }
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
@@ -344,7 +356,9 @@ static void send_mavlink_msg(mavlink_message_t *msg)
     if (len > 0) {
         gcs_bridge_send(buf, (size_t)len);
         s_tx_budget_count++;
+        return true;
     }
+    return false;
 }
 
 /* ── Drain all pending RPC telemetry into latest cache ────────── */
@@ -740,9 +754,11 @@ static void send_param_values(void)
                     MAV_PARAM_TYPE_REAL32,
                     s_param_store_count,
                     idx);
-                send_mavlink_msg(&msg);
-                s_param_value_send_idx++;
-                s_param_last_send_ms = now;
+                if (send_mavlink_msg(&msg)) {
+                    s_param_value_send_idx++;
+                    s_param_last_send_ms = now;
+                }
+                /* If send failed, don't advance index - retry next iteration */
             } else {
                 /* All params sent */
                 s_param_list_pending = false;
@@ -897,6 +913,18 @@ static void send_mission_current(void)
     send_mavlink_msg(&msg);
 }
 
+static void send_protocol_version(void)
+{
+    mavlink_message_t msg;
+    mavlink_msg_protocol_version_encode(&msg,
+        200,   /* version: MAVLink 2.0 * 100 */
+        100,   /* min_version: MAVLink 1.0 * 100 */
+        200    /* max_version: MAVLink 2.0 * 100 */
+    );
+    send_mavlink_msg(&msg);
+    ESP_LOGI(TAG, "Sent PROTOCOL_VERSION (v2.0)");
+}
+
 static void send_autopilot_version(void)
 {
     uint64_t cap = MAV_PROTOCOL_CAPABILITY_MISSION_INT
@@ -1044,8 +1072,12 @@ static void handle_command_long(const mavlink_message_t *msg)
         &param5, &param6, &param7,
         &target_system, &target_component);
 
+    ESP_LOGI(TAG, "COMMAND_LONG: cmd=%d from sys=%d comp=%d (target=%d/%d)",
+             command, msg->sysid, msg->compid, target_system, target_component);
+
     /* Ignore commands not addressed to us */
     if (target_system != 0 && target_system != MAV_SYS_ID) {
+        ESP_LOGD(TAG, "  -> ignored (not for us)");
         return;
     }
 
@@ -1203,18 +1235,28 @@ static void handle_command_long(const mavlink_message_t *msg)
         rpc_cmd.msg_type = 0;
         break;
 
+    case MAV_CMD_REQUEST_PROTOCOL_VERSION:
+        send_protocol_version();
+        result = MAV_RESULT_ACCEPTED;
+        rpc_cmd.msg_type = 0;
+        break;
+
     case MAV_CMD_REQUEST_MESSAGE:
         if ((uint32_t)param1 == MAVLINK_MSG_ID_AUTOPILOT_VERSION) {
             send_autopilot_version();
             result = MAV_RESULT_ACCEPTED;
+        } else if ((uint32_t)param1 == MAVLINK_MSG_ID_PROTOCOL_VERSION) {
+            send_protocol_version();
+            result = MAV_RESULT_ACCEPTED;
         } else if ((uint32_t)param1 == MAVLINK_MSG_ID_HOME_POSITION) {
-            /* Request home from Core 0 */
+            /* Forward to Core 0 via RPC */
             rpc_cmd.msg_type = RPC_CMD_REQUEST_HOME_POSITION;
             result = MAV_RESULT_ACCEPTED;
         } else {
+            ESP_LOGD(TAG, "REQUEST_MESSAGE: unsupported msg_id=%lu", (unsigned long)(uint32_t)param1);
             result = MAV_RESULT_UNSUPPORTED;
         }
-        rpc_cmd.msg_type = 0; /* already handled inline */
+        /* NOTE: don't clear rpc_cmd.msg_type here — HOME_POSITION needs it forwarded */
         break;
 
     default:
@@ -1226,7 +1268,9 @@ static void handle_command_long(const mavlink_message_t *msg)
     /* Send command ACK back to GCS (with originator target for proper routing) */
     mavlink_message_t ack_msg;
     mavlink_msg_command_ack_encode(&ack_msg, command, result, msg->sysid, msg->compid);
-    send_mavlink_msg(&ack_msg);
+    bool ack_sent = send_mavlink_msg(&ack_msg);
+    ESP_LOGI(TAG, "  -> ACK cmd=%d result=%d target=%d/%d %s",
+             command, result, msg->sysid, msg->compid, ack_sent ? "OK" : "DROPPED");
 
     /* Forward to Core 0 if accepted and has valid msg_type */
     if (result == MAV_RESULT_ACCEPTED && rpc_cmd.msg_type != 0) {
