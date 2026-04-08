@@ -57,10 +57,16 @@ static const char *TAG = "camera_h264";
 #define MIPI_LDO_CHAN_ID     3
 #define MIPI_LDO_VOLTAGE_MV  2500
 
-/* Camera format */
+/* Camera capture format (sensor → CSI → ISP) */
 #define CAM_FORMAT          "MIPI_2lane_24Minput_RAW8_800x640_50fps"
-#define CAM_WIDTH           800
-#define CAM_HEIGHT          640
+#define CAM_CAPTURE_W       800
+#define CAM_CAPTURE_H       640
+
+/* Stream resolution (software 2x downscale before JPEG encode).
+ * 400x320 at Q=40 ≈ 3-5KB per frame → 3-4 RTP packets → less SPI pressure,
+ * higher probability all packets arrive (less flickering). */
+#define CAM_WIDTH           400
+#define CAM_HEIGHT          320
 
 /* MIPI CSI lane bitrate */
 #define CSI_LANE_BITRATE_MBPS  200
@@ -78,8 +84,8 @@ static const char *TAG = "camera_h264";
 #define H264_BUF_SIZE       (100 * 1024)
 
 /* MJPEG encoder settings (primary — no I-frame burst, smooth SPI traffic) */
-#define MJPEG_QUALITY       10           /* JPEG quality 1-100 (10 ≈ 5-8KB per frame at 800x640) */
-#define MJPEG_FPS           3            /* Target FPS — total SPI budget shared with MAVLink */
+#define MJPEG_QUALITY       40           /* JPEG quality 1-100 (40 at 400x320 ≈ 3-5KB) */
+#define MJPEG_FPS           2            /* 2 FPS — minimal SPI pressure */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
 #define RTP_PORT            5600
@@ -165,9 +171,13 @@ static struct {
     size_t h264_send_size;
     volatile int h264_clients;    /* HTTP H.264 viewer count */
 
-    /* Raw frame double buffers (YUV420 from ISP) */
+    /* Raw frame double buffers (from ISP at capture resolution) */
     uint8_t *raw_buf[NUM_BUFS];
     size_t raw_buf_size;
+
+    /* Downscale buffer (capture → stream resolution) */
+    uint8_t *scale_buf;
+    size_t scale_buf_size;
 
     /* ISR → task signaling for frame capture */
     SemaphoreHandle_t frame_captured;
@@ -833,7 +843,8 @@ esp_err_t camera_h264_init(void)
     }
 
     ESP_LOGI(TAG, "Initializing MIPI-CSI camera pipeline");
-    ESP_LOGI(TAG, "Target: %dx%d, format: %s", CAM_WIDTH, CAM_HEIGHT, CAM_FORMAT);
+    ESP_LOGI(TAG, "Capture: %dx%d → Stream: %dx%d, format: %s",
+             CAM_CAPTURE_W, CAM_CAPTURE_H, CAM_WIDTH, CAM_HEIGHT, CAM_FORMAT);
 
     s_cam.frame_ready = xSemaphoreCreateBinary();
     s_cam.jpeg_mutex = xSemaphoreCreateMutex();
@@ -841,13 +852,13 @@ esp_err_t camera_h264_init(void)
     s_cam.h264_ready = xSemaphoreCreateBinary();
     s_cam.h264_mutex = xSemaphoreCreateMutex();
 
-    /* Allocate buffers */
-    /* YUV420 = 1.5 bytes/pixel, YUV422 = 2 bytes/pixel.
+    /* Allocate buffers at capture resolution (sensor → CSI → ISP output).
+     * YUV420 = 1.5 bytes/pixel, YUV422 = 2 bytes/pixel.
      * When MJPEG is enabled and SDK lacks YUV420 JPEG input, ISP must output YUV422. */
 #if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
-    s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;     /* YUV422 = 2 bytes/pixel */
+    s_cam.raw_buf_size = CAM_CAPTURE_W * CAM_CAPTURE_H * 2;     /* YUV422 = 2 bytes/pixel */
 #else
-    s_cam.raw_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2;  /* YUV420 = 1.5 bytes/pixel */
+    s_cam.raw_buf_size = CAM_CAPTURE_W * CAM_CAPTURE_H * 3 / 2;  /* YUV420 = 1.5 bytes/pixel */
 #endif
     s_cam.raw_buf_size = (s_cam.raw_buf_size + 63) & ~63;  /* Cache line align */
 
@@ -878,6 +889,23 @@ esp_err_t camera_h264_init(void)
         }
 #endif /* ENABLE_MJPEG */
     }
+
+    /* Downscale buffer: stream resolution (software 2x downscale before JPEG encode) */
+#if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
+    s_cam.scale_buf_size = CAM_WIDTH * CAM_HEIGHT * 2;   /* YUV422 */
+#else
+    s_cam.scale_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2; /* YUV420 */
+#endif
+    s_cam.scale_buf_size = (s_cam.scale_buf_size + 63) & ~63;
+    s_cam.scale_buf = heap_caps_aligned_calloc(64, 1, s_cam.scale_buf_size,
+                                                MALLOC_CAP_SPIRAM);
+    if (!s_cam.scale_buf) {
+        ESP_LOGE(TAG, "Failed to allocate downscale buffer");
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "Downscale buffer: %uKB (%dx%d → %dx%d)",
+             (unsigned)(s_cam.scale_buf_size / 1024),
+             CAM_CAPTURE_W, CAM_CAPTURE_H, CAM_WIDTH, CAM_HEIGHT);
 
     /* H.264 output buffer: 64-byte aligned for HW encoder DMA */
     s_cam.h264_buf = heap_caps_aligned_calloc(64, 1, H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
@@ -917,11 +945,11 @@ esp_err_t camera_h264_init(void)
         return ret;
     }
 
-    /* CSI controller */
+    /* CSI controller — capture at full sensor resolution */
     esp_cam_ctlr_csi_config_t csi_config = {
         .ctlr_id = 0,
-        .h_res = CAM_WIDTH,
-        .v_res = CAM_HEIGHT,
+        .h_res = CAM_CAPTURE_W,
+        .v_res = CAM_CAPTURE_H,
         .lane_bit_rate_mbps = CSI_LANE_BITRATE_MBPS,
         .input_data_color_type = CAM_CTLR_COLOR_RAW8,
 #if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
@@ -947,7 +975,7 @@ esp_err_t camera_h264_init(void)
     ESP_RETURN_ON_ERROR(esp_cam_ctlr_register_event_callbacks(s_cam.cam_handle, &cbs, NULL),
                         TAG, "CSI callback registration failed");
     ESP_RETURN_ON_ERROR(esp_cam_ctlr_enable(s_cam.cam_handle), TAG, "CSI enable failed");
-    ESP_LOGI(TAG, "MIPI-CSI controller initialized (2-lane, %dx%d)", CAM_WIDTH, CAM_HEIGHT);
+    ESP_LOGI(TAG, "MIPI-CSI controller initialized (2-lane, %dx%d)", CAM_CAPTURE_W, CAM_CAPTURE_H);
 
     /* ISP pipeline */
     isp_proc_handle_t isp_proc = NULL;
@@ -962,8 +990,8 @@ esp_err_t camera_h264_init(void)
 #endif
         .has_line_start_packet = false,
         .has_line_end_packet = false,
-        .h_res = CAM_WIDTH,
-        .v_res = CAM_HEIGHT,
+        .h_res = CAM_CAPTURE_W,
+        .v_res = CAM_CAPTURE_H,
     };
     ret = esp_isp_new_processor(&isp_config, &isp_proc);
     if (ret == ESP_OK) {
@@ -1004,7 +1032,7 @@ esp_err_t camera_h264_init(void)
     esp_h264_enc_cfg_hw_t h264_cfg = {
         .gop = H264_GOP,
         .fps = H264_FPS,
-        .res = { .width = CAM_WIDTH, .height = CAM_HEIGHT },
+        .res = { .width = CAM_CAPTURE_W, .height = CAM_CAPTURE_H },
         .rc = {
             .bitrate = H264_BITRATE,
             .qp_min = H264_QP_MIN,
@@ -1017,7 +1045,7 @@ esp_err_t camera_h264_init(void)
         h264_ret = esp_h264_enc_open(s_cam.h264_handle);
         if (h264_ret == ESP_H264_ERR_OK) {
             ESP_LOGI(TAG, "HW H.264 encoder initialized (%dx%d, GOP=%d, %d Kbps)",
-                     CAM_WIDTH, CAM_HEIGHT, H264_GOP, H264_BITRATE / 1000);
+                     CAM_CAPTURE_W, CAM_CAPTURE_H, H264_GOP, H264_BITRATE / 1000);
         } else {
             ESP_LOGW(TAG, "H.264 enc open failed: %d", h264_ret);
             s_cam.h264_handle = NULL;
@@ -1059,6 +1087,83 @@ esp_err_t camera_h264_init(void)
     return ESP_OK;
 }
 
+/* ========== Software 2x Downscale ========== */
+
+/*
+ * Nearest-neighbor 2x downscale for YUV422 packed (YUYV).
+ * Every YUYV macro pixel covers 2 horizontal pixels.
+ * Downscale: take every other macro pixel from every other row.
+ * src: CAM_CAPTURE_W x CAM_CAPTURE_H  →  dst: CAM_WIDTH x CAM_HEIGHT
+ */
+static void downscale_2x_yuv422(const uint8_t *src, uint8_t *dst,
+                                  int src_w, int src_h)
+{
+    int dst_w = src_w / 2;
+    /* src stride: 2 bytes per pixel (YUYV = 4 bytes per 2 pixels) */
+    int src_stride = src_w * 2;
+    /* dst stride: same ratio */
+    int dst_stride = dst_w * 2;
+
+    for (int y = 0; y < src_h; y += 2) {
+        const uint8_t *srow = src + y * src_stride;
+        uint8_t *drow = dst + (y / 2) * dst_stride;
+        /* Each YUYV macro pixel = 4 bytes (Y0 U Y1 V) covers 2 src pixels.
+         * Skip every other macro pixel (stride of 8 bytes = 4 src pixels). */
+        for (int x = 0; x < src_w; x += 4) {
+            /* Copy one macro pixel (4 bytes), skip the next */
+            const uint8_t *sp = srow + x * 2;
+            *drow++ = sp[0]; /* Y0 */
+            *drow++ = sp[1]; /* U  */
+            *drow++ = sp[2]; /* Y1 */
+            *drow++ = sp[3]; /* V  */
+        }
+    }
+}
+
+/*
+ * Nearest-neighbor 2x downscale for YUV420 planar (I420).
+ * Y plane: subsample both axes by 2.
+ * U, V planes: already half-res in both axes, subsample by 2 again.
+ */
+static void downscale_2x_yuv420(const uint8_t *src, uint8_t *dst,
+                                  int src_w, int src_h)
+{
+    int dst_w = src_w / 2;
+    int dst_h = src_h / 2;
+
+    /* Y plane */
+    const uint8_t *sy = src;
+    uint8_t *dy = dst;
+    for (int y = 0; y < src_h; y += 2) {
+        const uint8_t *srow = sy + y * src_w;
+        for (int x = 0; x < src_w; x += 2) {
+            *dy++ = srow[x];
+        }
+    }
+
+    /* U plane (src U is src_w/2 x src_h/2) */
+    int src_uv_w = src_w / 2;
+    int src_uv_h = src_h / 2;
+    const uint8_t *su = src + src_w * src_h;
+    uint8_t *du = dst + dst_w * dst_h;
+    for (int y = 0; y < src_uv_h; y += 2) {
+        const uint8_t *srow = su + y * src_uv_w;
+        for (int x = 0; x < src_uv_w; x += 2) {
+            *du++ = srow[x];
+        }
+    }
+
+    /* V plane */
+    const uint8_t *sv = su + src_uv_w * src_uv_h;
+    uint8_t *dv = dst + dst_w * dst_h + (dst_w / 2) * (dst_h / 2);
+    for (int y = 0; y < src_uv_h; y += 2) {
+        const uint8_t *srow = sv + y * src_uv_w;
+        for (int x = 0; x < src_uv_w; x += 2) {
+            *dv++ = srow[x];
+        }
+    }
+}
+
 /* ========== Camera Capture + Encode Task ========== */
 
 static void camera_capture_task(void *arg)
@@ -1098,6 +1203,21 @@ static void camera_capture_task(void *arg)
         esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
+        /* Software 2x downscale: capture res → stream res */
+#if ENABLE_MJPEG && !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
+        downscale_2x_yuv422(frame_data, s_cam.scale_buf,
+                            CAM_CAPTURE_W, CAM_CAPTURE_H);
+#else
+        downscale_2x_yuv420(frame_data, s_cam.scale_buf,
+                            CAM_CAPTURE_W, CAM_CAPTURE_H);
+#endif
+        /* Flush downscaled buffer to PSRAM for HW encoder DMA access */
+        esp_cache_msync(s_cam.scale_buf, s_cam.scale_buf_size,
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+        /* Use downscaled frame for encoding */
+        uint8_t *encode_data = s_cam.scale_buf;
+
         /* === MJPEG encode → send via UDP RTP (Primary path) === */
         int64_t t2 = t1;
         int64_t t4 = t1;
@@ -1127,7 +1247,7 @@ static void camera_capture_task(void *arg)
 
             uint32_t jpg_size = 0;
             esp_err_t ret = jpeg_encoder_process(s_cam.jpeg_handle, &jpeg_cfg,
-                                                  frame_data, s_cam.raw_buf_size,
+                                                  encode_data, s_cam.scale_buf_size,
                                                   s_cam.jpeg_buf[wr_idx], JPEG_BUF_SIZE,
                                                   &jpg_size);
             t4 = esp_timer_get_time();
@@ -1166,7 +1286,7 @@ static void camera_capture_task(void *arg)
                 esp_h264_enc_in_frame_t in_frame = {
                     .raw_data = { .buffer = frame_data },
                 };
-                in_frame.raw_data.len = CAM_WIDTH * CAM_HEIGHT * 3 / 2;
+                in_frame.raw_data.len = CAM_CAPTURE_W * CAM_CAPTURE_H * 3 / 2;
 
                 esp_h264_enc_out_frame_t out_frame = {
                     .raw_data = {
