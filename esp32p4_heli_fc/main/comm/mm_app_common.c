@@ -147,9 +147,15 @@ void app_wlan_init(void)
     status = mmwlan_register_tx_flow_control_cb(tx_flow_control_cb, NULL);
     printf("TX flow control callback registered (status=%d)\n", status);
 
-    /* MCS2 (QPSK 3/4), 2MHz BW, Long GI — ~2.6Mbps, reliable for long-range drone */
-    status = mmwlan_ate_override_rate_control(MMWLAN_MCS_2, MMWLAN_BW_2MHZ, MMWLAN_GI_LONG);
-    printf("Rate control override: MCS2, BW=2MHz, GI=Long (status=%d)\n", status);
+    /* Auto rate adaptation: let the chip pick the best MCS/BW/GI.
+     * MMWLAN_MCS_NONE = no override → chip uses rate control algorithm.
+     * Previously MCS2 was forced, limiting throughput to ~1.95Mbps PHY.
+     * With auto, the chip can use MCS5-7 at close range (~5-8Mbps PHY). */
+    status = mmwlan_ate_override_rate_control(MMWLAN_MCS_NONE, MMWLAN_BW_NONE, MMWLAN_GI_NONE);
+    printf("Rate control: AUTO (no override) status=%d\n", status);
+
+    /* Enable SGI support for higher throughput when conditions are good */
+    mmwlan_set_sgi_enabled(true);
 
     mmwlan_set_channel_list(load_channel_list());
 
