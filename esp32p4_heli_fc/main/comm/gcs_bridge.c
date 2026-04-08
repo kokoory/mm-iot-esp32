@@ -76,8 +76,9 @@ int gcs_bridge_send(const uint8_t *buf, size_t len)
         return -1;
     }
 
-    /* Before GCS is detected, only allow small packets (heartbeat ~34 bytes)
-     * to avoid flooding HaLow TX pool with broadcast data */
+    /* Before GCS is detected, broadcast only heartbeats (small packets)
+     * to avoid flooding HaLow TX pool with large broadcast data.
+     * Once GCS is detected, all packets are sent via unicast. */
     if (!s_gcs_addr_known && len > 50) {
         return 0;
     }
@@ -125,21 +126,23 @@ int gcs_bridge_recv(uint8_t *buf, size_t max_len, uint32_t timeout_ms)
     }
 
     if (ret > 0 && !s_gcs_addr_known) {
-        /* Auto-detect GCS IP from first received packet */
+        /* Auto-detect GCS IP from first received packet.
+         * Always reply to the standard MAVLink port (14550), NOT the
+         * ephemeral source port — QGC listens on 14550 but may send
+         * from a random OS-assigned port. */
         s_gcs_addr.sin_addr = src_addr.sin_addr;
-        s_gcs_addr.sin_port = src_addr.sin_port;
+        s_gcs_addr.sin_port = htons(GCS_BRIDGE_UDP_PORT);
         s_gcs_addr_known = true;
         s_status = GCS_BRIDGE_CONNECTED;
-        ESP_LOGI(TAG, "GCS detected at %s:%d",
-                 inet_ntoa(src_addr.sin_addr), ntohs(src_addr.sin_port));
+        ESP_LOGI(TAG, "GCS detected at %s (reply to port %d)",
+                 inet_ntoa(src_addr.sin_addr), GCS_BRIDGE_UDP_PORT);
     } else if (ret > 0) {
-        /* Update GCS address if it changed (e.g. GCS reconnect) */
-        if (src_addr.sin_addr.s_addr != s_gcs_addr.sin_addr.s_addr ||
-            src_addr.sin_port != s_gcs_addr.sin_port) {
+        /* Update GCS IP if it changed (e.g. GCS reconnect) */
+        if (src_addr.sin_addr.s_addr != s_gcs_addr.sin_addr.s_addr) {
             s_gcs_addr.sin_addr = src_addr.sin_addr;
-            s_gcs_addr.sin_port = src_addr.sin_port;
-            ESP_LOGI(TAG, "GCS address updated to %s:%d",
-                     inet_ntoa(src_addr.sin_addr), ntohs(src_addr.sin_port));
+            s_gcs_addr.sin_port = htons(GCS_BRIDGE_UDP_PORT);
+            ESP_LOGI(TAG, "GCS address updated to %s (port %d)",
+                     inet_ntoa(src_addr.sin_addr), GCS_BRIDGE_UDP_PORT);
         }
     }
 

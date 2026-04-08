@@ -956,6 +956,7 @@ static void send_autopilot_version(void)
 {
     uint64_t cap = MAV_PROTOCOL_CAPABILITY_MISSION_INT
                  | MAV_PROTOCOL_CAPABILITY_PARAM_FLOAT
+                 | MAV_PROTOCOL_CAPABILITY_COMMAND_INT
                  | MAV_PROTOCOL_CAPABILITY_MAVLINK2
                  | MAV_PROTOCOL_CAPABILITY_FTP
                  | MAV_PROTOCOL_CAPABILITY_MISSION_FENCE
@@ -1277,23 +1278,19 @@ static void handle_command_long(const mavlink_message_t *msg)
     }
 
     case MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES:
-        send_autopilot_version();
         result = MAV_RESULT_ACCEPTED;
         rpc_cmd.msg_type = 0;
         break;
 
     case MAV_CMD_REQUEST_PROTOCOL_VERSION:
-        send_protocol_version();
         result = MAV_RESULT_ACCEPTED;
         rpc_cmd.msg_type = 0;
         break;
 
     case MAV_CMD_REQUEST_MESSAGE:
         if ((uint32_t)param1 == MAVLINK_MSG_ID_AUTOPILOT_VERSION) {
-            send_autopilot_version();
             result = MAV_RESULT_ACCEPTED;
         } else if ((uint32_t)param1 == MAVLINK_MSG_ID_PROTOCOL_VERSION) {
-            send_protocol_version();
             result = MAV_RESULT_ACCEPTED;
         } else if ((uint32_t)param1 == MAVLINK_MSG_ID_HOME_POSITION) {
             /* Forward to Core 0 via RPC */
@@ -1312,12 +1309,33 @@ static void handle_command_long(const mavlink_message_t *msg)
         break;
     }
 
-    /* Send command ACK back to GCS (with originator target for proper routing) */
+    /* Send command ACK FIRST, then any response data.
+     * QGC expects ACK before the requested message. */
     mavlink_message_t ack_msg;
     mavlink_msg_command_ack_encode(&ack_msg, command, result, msg->sysid, msg->compid);
     bool ack_sent = send_mavlink_msg(&ack_msg);
     ESP_LOGI(TAG, "  -> ACK cmd=%d result=%d target=%d/%d %s",
              command, result, msg->sysid, msg->compid, ack_sent ? "OK" : "DROPPED");
+
+    /* Now send the deferred response messages (after ACK) */
+    if (result == MAV_RESULT_ACCEPTED) {
+        switch (command) {
+        case MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES:
+            send_autopilot_version();
+            break;
+        case MAV_CMD_REQUEST_PROTOCOL_VERSION:
+            send_protocol_version();
+            break;
+        case MAV_CMD_REQUEST_MESSAGE:
+            if ((uint32_t)param1 == MAVLINK_MSG_ID_AUTOPILOT_VERSION)
+                send_autopilot_version();
+            else if ((uint32_t)param1 == MAVLINK_MSG_ID_PROTOCOL_VERSION)
+                send_protocol_version();
+            break;
+        default:
+            break;
+        }
+    }
 
     /* Forward to Core 0 if accepted and has valid msg_type */
     if (result == MAV_RESULT_ACCEPTED && rpc_cmd.msg_type != 0) {
@@ -1935,7 +1953,7 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     s_vib_clip[0] = s_vib_clip[1] = s_vib_clip[2] = 0;
 
     uint32_t now = get_time_ms();
-    s_last_heartbeat_ms  = now;
+    s_last_heartbeat_ms  = 0;    /* Force immediate first heartbeat */
     s_last_attitude_ms   = now;
     s_last_gps_ms        = now;
     s_last_battery_ms    = now;
