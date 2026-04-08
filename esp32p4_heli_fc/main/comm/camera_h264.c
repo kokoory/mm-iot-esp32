@@ -777,9 +777,13 @@ static esp_err_t sensor_init(void)
         .sensor_port = ESP_CAM_SENSOR_MIPI_CSI,
     };
 
+    int num_sensors = &__esp_cam_sensor_detect_fn_array_end - &__esp_cam_sensor_detect_fn_array_start;
+    ESP_LOGI(TAG, "Scanning %d registered sensor driver(s)...", num_sensors);
+
     esp_cam_sensor_device_t *cam = NULL;
     for (esp_cam_sensor_detect_fn_t *p = &__esp_cam_sensor_detect_fn_array_start;
          p < &__esp_cam_sensor_detect_fn_array_end; ++p) {
+        ESP_LOGI(TAG, "  Probing SCCB addr 0x%02X ...", p->sccb_addr);
         sccb_i2c_config_t i2c_config = {
             .scl_speed_hz = CAM_SCCB_FREQ,
             .device_address = p->sccb_addr,
@@ -795,6 +799,7 @@ static esp_err_t sensor_init(void)
             }
             break;
         }
+        ESP_LOGI(TAG, "  No sensor at 0x%02X", p->sccb_addr);
         ESP_ERROR_CHECK(esp_sccb_del_i2c_io(cam_config.sccb_handle));
     }
 
@@ -803,11 +808,21 @@ static esp_err_t sensor_init(void)
         return ESP_ERR_NOT_FOUND;
     }
 
+    /* Log detected sensor identity */
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Detected camera : %s", cam->name ? cam->name : "unknown");
+    ESP_LOGI(TAG, "  Product ID (PID): 0x%04X", (unsigned)cam->id.pid);
+    ESP_LOGI(TAG, "  Manufacturer ID : 0x%02X%02X", cam->id.midh, cam->id.midl);
+    ESP_LOGI(TAG, "  Version         : 0x%02X", cam->id.ver);
+    ESP_LOGI(TAG, "========================================");
+
     esp_cam_sensor_format_array_t fmt_array = {0};
     esp_cam_sensor_query_format(cam, &fmt_array);
     const esp_cam_sensor_format_t *formats = fmt_array.format_array;
+    ESP_LOGI(TAG, "Supported formats (%d):", fmt_array.count);
     for (int i = 0; i < fmt_array.count; i++) {
-        ESP_LOGI(TAG, "  Sensor format[%d]: %s", i, formats[i].name);
+        ESP_LOGI(TAG, "  [%d] %s (%dx%d @ %dfps)", i, formats[i].name,
+                 formats[i].width, formats[i].height, formats[i].fps);
     }
 
     esp_cam_sensor_format_t *target_fmt = NULL;
@@ -864,11 +879,11 @@ esp_err_t camera_h264_init(void)
 #else
     s_cam.raw_buf_size = CAM_CAPTURE_W * CAM_CAPTURE_H * 3 / 2;  /* YUV420 = 1.5 bytes/pixel */
 #endif
-    s_cam.raw_buf_size = (s_cam.raw_buf_size + 63) & ~63;  /* Cache line align */
+    s_cam.raw_buf_size = (s_cam.raw_buf_size + 127) & ~127;  /* 128-byte align for H.264 HW encoder */
 
     for (int i = 0; i < NUM_BUFS; i++) {
-        /* Raw buffers: 64-byte aligned for CSI DMA */
-        s_cam.raw_buf[i] = heap_caps_aligned_calloc(64, 1, s_cam.raw_buf_size,
+        /* Raw buffers: 128-byte aligned for CSI DMA + H.264 HW encoder */
+        s_cam.raw_buf[i] = heap_caps_aligned_calloc(128, 1, s_cam.raw_buf_size,
                                                      MALLOC_CAP_SPIRAM);
         if (!s_cam.raw_buf[i]) {
             ESP_LOGE(TAG, "Failed to allocate raw frame buffer %d", i);
@@ -900,8 +915,8 @@ esp_err_t camera_h264_init(void)
 #else
     s_cam.scale_buf_size = CAM_WIDTH * CAM_HEIGHT * 3 / 2; /* YUV420 */
 #endif
-    s_cam.scale_buf_size = (s_cam.scale_buf_size + 63) & ~63;
-    s_cam.scale_buf = heap_caps_aligned_calloc(64, 1, s_cam.scale_buf_size,
+    s_cam.scale_buf_size = (s_cam.scale_buf_size + 127) & ~127;
+    s_cam.scale_buf = heap_caps_aligned_calloc(128, 1, s_cam.scale_buf_size,
                                                 MALLOC_CAP_SPIRAM);
     if (!s_cam.scale_buf) {
         ESP_LOGE(TAG, "Failed to allocate downscale buffer");
@@ -911,8 +926,8 @@ esp_err_t camera_h264_init(void)
              (unsigned)(s_cam.scale_buf_size / 1024),
              CAM_CAPTURE_W, CAM_CAPTURE_H, CAM_WIDTH, CAM_HEIGHT);
 
-    /* H.264 output buffer: 64-byte aligned for HW encoder DMA */
-    s_cam.h264_buf = heap_caps_aligned_calloc(64, 1, H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    /* H.264 output buffer: 128-byte aligned for HW encoder DMA */
+    s_cam.h264_buf = heap_caps_aligned_calloc(128, 1, H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
     s_cam.h264_send_buf = heap_caps_malloc(H264_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!s_cam.h264_buf || !s_cam.h264_send_buf) {
         ESP_LOGE(TAG, "Failed to allocate H.264 buffer");
