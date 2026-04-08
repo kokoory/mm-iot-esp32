@@ -170,7 +170,7 @@ static void param_store_init(void)
 static int param_find(const char *name)
 {
     for (int i = 0; i < s_param_store_count; i++) {
-        if (strncmp(s_param_store[i].name, name, 16) == 0) {
+        if (strcmp(s_param_store[i].name, name) == 0) {
             return i;
         }
     }
