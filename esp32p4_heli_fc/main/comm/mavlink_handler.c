@@ -324,8 +324,8 @@ static bool rate_check(uint32_t *last_ms, uint8_t hz)
 
 /* TX rate limiter: cap outbound packets to avoid saturating HaLow TX pool.
  * Dynamic: base 50 pkt/s, up to 100 at MCS5+. Critical msgs always pass. */
-#define TX_BUDGET_BASE_PER_SEC  50   /* base MAVLink packets per second (was 30) */
-#define TX_BUDGET_MAX_PER_SEC  100   /* ceiling for high MCS */
+#define TX_BUDGET_BASE_PER_SEC  30   /* base MAVLink packets per second — conservative for SPI */
+#define TX_BUDGET_MAX_PER_SEC   60   /* ceiling — shared SPI with video RTP */
 #define TX_BUDGET_WINDOW_MS   1000
 static uint32_t s_tx_budget_limit = TX_BUDGET_BASE_PER_SEC;
 static uint32_t s_tx_budget_count = 0;
