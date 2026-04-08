@@ -88,6 +88,75 @@ void app_wlan_print_link_stats(void)
     }
 }
 
+/* PHY data rate table: MCS → kbps for 2MHz BW, LGI
+ * Source: IEEE 802.11ah Table S36 */
+static const uint32_t s_phy_rate_2mhz_lgi_kbps[] = {
+    /* MCS0 */  650,
+    /* MCS1 */ 1300,
+    /* MCS2 */ 1950,
+    /* MCS3 */ 2600,
+    /* MCS4 */ 3900,
+    /* MCS5 */ 5200,
+    /* MCS6 */ 5850,
+    /* MCS7 */ 6500,
+    /* MCS8 */ 7800,
+    /* MCS9 */ 8667,
+};
+
+void app_wlan_get_link_quality(app_wlan_link_quality_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->mcs = 0xFF;
+    out->bw_mhz = 2;
+    out->throughput_bps = 75000; /* safe default: 600 kbps */
+
+    struct mmwlan_rc_stats *rc = mmwlan_get_rc_stats();
+    if (!rc || rc->n_entries == 0) {
+        if (rc) mmwlan_free_rc_stats(rc);
+        return;
+    }
+
+    /* Find the most-used rate (highest total_sent) */
+    uint32_t best_idx = 0;
+    uint32_t best_sent = 0;
+    for (uint32_t i = 0; i < rc->n_entries; i++) {
+        if (rc->total_sent[i] > best_sent) {
+            best_sent = rc->total_sent[i];
+            best_idx = i;
+        }
+    }
+
+    if (best_sent > 0) {
+        uint32_t info = rc->rate_info[best_idx];
+        uint32_t bw  = info & 0x0F;
+        uint32_t mcs = (info >> 4) & 0x0F;
+        uint32_t gi  = (info >> 8) & 0x01;
+        uint32_t success = rc->total_success[best_idx];
+
+        out->mcs = (uint8_t)mcs;
+        out->bw_mhz = (bw == 0) ? 1 : (bw == 1) ? 2 : 4;
+        out->sgi = (uint8_t)gi;
+        out->loss_pct = (uint8_t)((1.0f - (float)success / (float)best_sent) * 100.0f);
+
+        /* Compute usable throughput:
+         * PHY rate (for 2MHz LGI) × BW scaling × SGI bonus × (1 - loss) × MAC overhead (~60%) */
+        uint32_t phy_kbps = (mcs <= 9) ? s_phy_rate_2mhz_lgi_kbps[mcs] : 1950;
+        /* BW scaling: 1MHz=0.5x, 2MHz=1x, 4MHz=2x */
+        if (out->bw_mhz == 1) phy_kbps /= 2;
+        else if (out->bw_mhz == 4) phy_kbps *= 2;
+        /* SGI: ~11% faster */
+        if (gi) phy_kbps = phy_kbps * 111 / 100;
+        /* MAC overhead (~60% of PHY rate is usable data) */
+        uint32_t mac_kbps = phy_kbps * 60 / 100;
+        /* Packet loss */
+        uint32_t usable_kbps = mac_kbps * (100 - out->loss_pct) / 100;
+        /* Convert to bytes/sec */
+        out->throughput_bps = usable_kbps * 1000 / 8;
+    }
+
+    mmwlan_free_rc_stats(rc);
+}
+
 static void sta_status_callback(enum mmwlan_sta_state sta_state)
 {
     switch (sta_state)

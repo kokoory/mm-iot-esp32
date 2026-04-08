@@ -322,9 +322,12 @@ static bool rate_check(uint32_t *last_ms, uint8_t hz)
     return false;
 }
 
-/* TX rate limiter: cap outbound packets to avoid saturating HaLow TX pool */
-#define TX_BUDGET_MAX_PER_SEC  30   /* max MAVLink packets per second */
+/* TX rate limiter: cap outbound packets to avoid saturating HaLow TX pool.
+ * Dynamic: base 50 pkt/s, up to 100 at MCS5+. Critical msgs always pass. */
+#define TX_BUDGET_BASE_PER_SEC  50   /* base MAVLink packets per second (was 30) */
+#define TX_BUDGET_MAX_PER_SEC  100   /* ceiling for high MCS */
 #define TX_BUDGET_WINDOW_MS   1000
+static uint32_t s_tx_budget_limit = TX_BUDGET_BASE_PER_SEC;
 static uint32_t s_tx_budget_count = 0;
 static uint32_t s_tx_budget_window_start = 0;
 
@@ -355,7 +358,7 @@ static bool send_mavlink_msg(mavlink_message_t *msg)
     bool critical = is_critical_msg(msg->msgid);
 
     /* Drop non-critical telemetry when budget exhausted */
-    if (s_tx_budget_count >= TX_BUDGET_MAX_PER_SEC && !critical) {
+    if (s_tx_budget_count >= s_tx_budget_limit && !critical) {
         return false;
     }
 
@@ -1066,8 +1069,28 @@ static void calibration_tick(void)
     }
 }
 
+/* Update MAVLink TX budget based on link quality (called every ~1s from send_telemetry) */
+static uint32_t s_mavlink_budget_update_ms = 0;
+
+static void update_mavlink_tx_budget(void)
+{
+    uint32_t now = get_time_ms();
+    if ((now - s_mavlink_budget_update_ms) < 2000) return;
+    s_mavlink_budget_update_ms = now;
+
+    app_wlan_link_quality_t lq;
+    app_wlan_get_link_quality(&lq);
+
+    /* Scale TX budget: ~1 pkt per 1 KB/s of throughput (avg MAVLink pkt ~50 bytes) */
+    uint32_t budget = lq.throughput_bps / 500;
+    if (budget < TX_BUDGET_BASE_PER_SEC) budget = TX_BUDGET_BASE_PER_SEC;
+    if (budget > TX_BUDGET_MAX_PER_SEC)  budget = TX_BUDGET_MAX_PER_SEC;
+    s_tx_budget_limit = budget;
+}
+
 static void send_telemetry(void)
 {
+    update_mavlink_tx_budget();
     send_heartbeat();
     send_attitude();
     send_gps();
@@ -1878,12 +1901,12 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     if (config) {
         s_config = *config;
     } else {
-        /* Default rates */
+        /* Default rates — higher now with dynamic TX budget */
         s_config.heartbeat_hz  = 1;
         s_config.attitude_hz   = 10;
         s_config.gps_hz        = 5;
-        s_config.battery_hz    = 2;
-        s_config.vfr_hud_hz   = 2;
+        s_config.battery_hz    = 5;
+        s_config.vfr_hud_hz   = 5;
     }
 
     mavlink_parser_init(&s_parser);

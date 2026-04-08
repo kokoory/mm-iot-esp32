@@ -69,12 +69,12 @@ static const char *TAG = "camera_h264";
 #define JPEG_QUALITY        30           /* Low quality for HaLow bandwidth */
 #define JPEG_BUF_SIZE       (100 * 1024) /* 100KB for low-quality 800x640 */
 
-/* H.264 encoder settings */
-#define H264_GOP            25           /* I-frame every 5 sec (was 10) — reduces I-frame flood frequency */
-#define H264_FPS            5            /* Encode at 5fps for HaLow bandwidth */
-#define H264_QP_MIN         30           /* Allow decent quality (was 36) */
-#define H264_QP_MAX         44           /* Still aggressive for HaLow (was 48) */
-#define H264_BITRATE        250000       /* 250 Kbps target — 60% of ~400kbps usable (was 100K — too low for 800x640) */
+/* H.264 encoder settings — higher defaults, tuned down dynamically if link is poor */
+#define H264_GOP            30           /* I-frame every 3 sec at 10fps */
+#define H264_FPS            10           /* Encode at 10fps (was 5) — smooth video */
+#define H264_QP_MIN         26           /* Better quality (was 30) */
+#define H264_QP_MAX         42           /* Allow aggressive compression when needed */
+#define H264_BITRATE        500000       /* 500 Kbps target (was 250K) — uses ~60% of MCS2 throughput */
 #define H264_BUF_SIZE       (100 * 1024) /* 100KB per encoded frame */
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
@@ -82,9 +82,9 @@ static const char *TAG = "camera_h264";
 #define RTP_PKT_MAX_SIZE    1200         /* Small packets for HaLow stability */
 #define RTP_HEADER_SIZE     12
 #define RTP_PAYLOAD_TYPE    96           /* Dynamic PT for H.264 */
-#define RTP_PACING_MS       3            /* Base pacing for P-frames (was 5) */
-#define RTP_PACING_I_MS     15           /* I-frame pacing: ~80KB/s burst (was 8 → 175KB/s which overflows MM6108 SPI) */
-#define RTP_MAX_P_FRAME     6000         /* Skip P-frames larger than 6KB */
+#define RTP_PACING_MS       2            /* Base pacing for P-frames */
+#define RTP_PACING_I_MS     8            /* I-frame pacing (dynamic budget prevents SPI overflow now) */
+#define RTP_MAX_P_FRAME     12000        /* Skip P-frames larger than 12KB (was 6KB) */
 #define RTP_I_WAIT_TIMEOUT_MS 300        /* Max wait for TX drain during I-frame (prevents infinite stall) */
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
@@ -237,8 +237,44 @@ static void rtp_header_serialize(uint8_t *buf, uint16_t seq, uint32_t ts, uint32
     buf[11] = ssrc & 0xFF;
 }
 
-/* TX byte rate budget: ~75 KB/s = 600 kbps (safe for MCS2 with 30% loss) */
-#define RTP_TX_BUDGET_BYTES_PER_SEC  75000
+/* Dynamic TX byte rate budget based on link quality.
+ * Reserve 30% of usable throughput for MAVLink telemetry.
+ * Update every 2 seconds from MCS/loss stats. */
+#define RTP_TX_BUDGET_MIN        50000   /* 50 KB/s floor (MCS0 / very lossy) */
+#define RTP_TX_BUDGET_MAX       400000   /* 400 KB/s ceiling (MCS7+ / low loss) */
+#define RTP_TX_BUDGET_DEFAULT    75000   /* Default before first measurement */
+#define RTP_BUDGET_UPDATE_MS      2000   /* Re-evaluate link quality every 2s */
+#define RTP_MAVLINK_RESERVE_PCT     30   /* Reserve 30% of throughput for MAVLink */
+
+static uint32_t s_rtp_tx_budget = RTP_TX_BUDGET_DEFAULT;
+static uint32_t s_rtp_budget_update_ms = 0;
+
+static void rtp_update_tx_budget(void)
+{
+    uint32_t now = xTaskGetTickCount();
+    if ((now - s_rtp_budget_update_ms) < pdMS_TO_TICKS(RTP_BUDGET_UPDATE_MS)) {
+        return;
+    }
+    s_rtp_budget_update_ms = now;
+
+    app_wlan_link_quality_t lq;
+    app_wlan_get_link_quality(&lq);
+
+    /* Video gets (100 - RESERVE)% of usable throughput */
+    uint32_t budget = lq.throughput_bps * (100 - RTP_MAVLINK_RESERVE_PCT) / 100;
+
+    /* Clamp */
+    if (budget < RTP_TX_BUDGET_MIN) budget = RTP_TX_BUDGET_MIN;
+    if (budget > RTP_TX_BUDGET_MAX) budget = RTP_TX_BUDGET_MAX;
+
+    if (budget != s_rtp_tx_budget) {
+        ESP_LOGI(TAG, "[rtp] TX budget: %lu→%lu B/s (MCS%d %dMHz %s loss=%d%% throughput=%lu B/s)",
+                 (unsigned long)s_rtp_tx_budget, (unsigned long)budget,
+                 lq.mcs, lq.bw_mhz, lq.sgi ? "SGI" : "LGI",
+                 lq.loss_pct, (unsigned long)lq.throughput_bps);
+        s_rtp_tx_budget = budget;
+    }
+}
 
 static bool rtp_tx_budget_check(size_t bytes)
 {
@@ -247,7 +283,7 @@ static bool rtp_tx_budget_check(size_t bytes)
         s_cam.tx_bytes_this_sec = 0;
         s_cam.tx_window_start = now;
     }
-    if (s_cam.tx_bytes_this_sec + bytes > RTP_TX_BUDGET_BYTES_PER_SEC) {
+    if (s_cam.tx_bytes_this_sec + bytes > s_rtp_tx_budget) {
         return false; /* over budget */
     }
     s_cam.tx_bytes_this_sec += bytes;
@@ -287,6 +323,9 @@ static void rtp_send_packet(const uint8_t *data, size_t len, bool marker)
 static void rtp_send_frame(const uint8_t *buf, size_t len)
 {
     if (s_cam.rtp_sock < 0) return;
+
+    /* Periodically update TX budget based on link quality */
+    rtp_update_tx_budget();
 
     /* On-demand: only send RTP when GCS is actively connected */
     if (!gcs_bridge_is_active()) {
