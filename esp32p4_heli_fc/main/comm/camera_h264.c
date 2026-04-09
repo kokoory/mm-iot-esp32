@@ -167,7 +167,7 @@ esp_err_t camera_h264_init(void)
     ESP_LOGI(TAG, "Initializing USB webcam pipeline (MJPEG %dx%d @%dfps)",
              USB_CAM_WIDTH, USB_CAM_HEIGHT, USB_CAM_FPS);
 
-    s_cam.frame_ready = xSemaphoreCreateBinary();
+    s_cam.frame_ready = xSemaphoreCreateCounting(NUM_BUFS, 0);
     s_cam.jpeg_mutex = xSemaphoreCreateMutex();
 
     /* Allocate MJPEG double buffers in PSRAM */
@@ -233,22 +233,21 @@ esp_err_t camera_h264_init(void)
 
     ESP_LOGI(TAG, "Waiting for USB camera (VID=0x%04X PID=0x%04X MJPEG %dx%d@%dfps)...",
              USB_CAM_VID, USB_CAM_PID, USB_CAM_WIDTH, USB_CAM_HEIGHT, USB_CAM_FPS);
-    ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_cam.uvc_stream);
+    ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(15000), &s_cam.uvc_stream);
     if (ret != ESP_OK) {
         /* Exact VID/PID failed — retry accepting any UVC device */
         ESP_LOGW(TAG, "C920 open failed (%s), retrying with any UVC device...",
                  esp_err_to_name(ret));
         stream_config.usb.vid = 0;
         stream_config.usb.pid = 0;
-        ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_cam.uvc_stream);
+        ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(15000), &s_cam.uvc_stream);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "UVC stream open failed: %s (is USB camera connected?)",
                      esp_err_to_name(ret));
-            /* Continue without camera — HTTP server will still start
-             * for thermal camera and status endpoints */
-            s_cam.initialized = true;
-            s_cam.stats_start_time = esp_timer_get_time();
-            return ESP_OK;
+            /* Return error — camera_h264_init caller will log and continue.
+             * HTTP server still starts for thermal camera + status. */
+            s_cam.uvc_stream = NULL;
+            return ret;
         }
     }
 
@@ -315,9 +314,9 @@ static esp_err_t status_handler(httpd_req_t *req)
 
 static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
 {
-    if (!s_cam.initialized) {
+    if (!s_cam.initialized || !s_cam.uvc_stream) {
         httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_send(req, "Camera not initialized", HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "Camera not available", HTTPD_RESP_USE_STRLEN);
     }
 
     httpd_resp_set_type(req, STREAM_CONTENT_TYPE);

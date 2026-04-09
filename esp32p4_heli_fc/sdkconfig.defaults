@@ -39,8 +39,9 @@ CONFIG_MBEDTLS_NIST_KW_C=y
 # ── Timer profiling (matching reference) ──
 CONFIG_ESP_TIMER_PROFILING=y
 
-# ── USB Host (large control transfer for UVC config descriptor) ──
+# ── USB Host (webcam + thermal camera UVC config descriptor) ──
 CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=4096
+CONFIG_USB_OTG_SUPPORTED=y
 
 # ── Logging (use RTOS ticks for timestamps — system time triggers
 #    _tzset_unlocked_r from ISR context causing lock_acquire_generic abort) ──

@@ -2,8 +2,8 @@
  * Thermal Camera — FLIR Lepton 3.5 via SPI (VoSPI) + I2C (CCI)
  *
  * SparkFun Lepton Breakout Board:
- *   VoSPI (video): SPI3_HOST shared with IMU/MAG, 20MHz Mode 3
- *   CCI (control): I2C0 shared with camera SCCB, addr 0x2A
+ *   VoSPI (video): SPI3_HOST shared with IMU/MAG, 10MHz Mode 3
+ *   CCI (control): I2C0, addr 0x2A
  *   Resolution: 160x120, Grey14 (2 bytes/pixel), ~9fps
  */
 #pragma once

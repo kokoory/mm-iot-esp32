@@ -2,8 +2,8 @@
  * Thermal Camera — FLIR Lepton 3.5 via SPI (VoSPI) + I2C (CCI)
  *
  * SparkFun Lepton Breakout Board connected to ESP32-P4:
- *   VoSPI: SPI3_HOST shared with IMU/MAG (20MHz, Mode 3)
- *   CCI:   I2C0 shared with camera SCCB (address 0x2A)
+ *   VoSPI: SPI3_HOST shared with IMU/MAG (10MHz, Mode 3)
+ *   CCI:   I2C0 (address 0x2A)
  *   CS:    PIN_LEPTON_CS (GPIO 31)
  *   Note:  SparkFun breakout has no RST pin (reset via I2C CCI)
  *
@@ -314,8 +314,33 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     ESP_LOGI(TAG, "Waiting %dms for Lepton boot...", LEP_BOOT_WAIT_MS);
     vTaskDelay(pdMS_TO_TICKS(LEP_BOOT_WAIT_MS));
 
-    /* Wait for sensor I2C bus to be ready */
+    /* Wait for sensor SPI init to complete (Lepton shares SPI3_HOST) */
     i2c_sync_wait_sensors();
+
+    /* Initialize I2C bus for Lepton CCI if not already created.
+     * sensor_agent only uses SPI — I2C bus must be created here. */
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    esp_err_t bus_err = i2c_master_get_bus_handle(I2C_PORT, &i2c_bus);
+    if (bus_err != ESP_OK || i2c_bus == NULL) {
+        i2c_master_bus_config_t i2c_cfg = {
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .i2c_port = I2C_PORT,
+            .scl_io_num = PIN_I2C_SCL,
+            .sda_io_num = PIN_I2C_SDA,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
+        ret = i2c_new_master_bus(&i2c_cfg, &i2c_bus);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(ret));
+            ESP_LOGW(TAG, "Lepton CCI unavailable — VoSPI may still work");
+        } else {
+            ESP_LOGI(TAG, "I2C bus created (SCL=%d, SDA=%d) for Lepton CCI",
+                     PIN_I2C_SCL, PIN_I2C_SDA);
+        }
+    } else {
+        ESP_LOGI(TAG, "Reusing existing I2C bus for Lepton CCI");
+    }
 
     /* Add Lepton as SPI device on shared bus (SPI3_HOST)
      * SPI Mode 3: CPOL=1, CPHA=1 — per VoSPI spec */
@@ -331,7 +356,8 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         ESP_LOGE(TAG, "SPI device add failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "SPI device added on SPI3_HOST (20MHz, Mode 3)");
+    ESP_LOGI(TAG, "SPI device added on SPI3_HOST (%dMHz, Mode 3)",
+             LEPTON_SPI_FREQ / 1000000);
 
     /* Check Lepton boot status via I2C CCI */
     bool booted = false;
@@ -360,7 +386,7 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     xTaskCreatePinnedToCore(lepton_vospi_task, "lepton", 4096, NULL, 6, &s_lep.task_handle, 1);
 
     s_lep.initialized = true;
-    s_lep.active = true;
+    /* active is set to true by thermal_camera_start() or when first frame arrives */
     ESP_LOGI(TAG, "Lepton 3.5 initialized (160x120 Grey14, ~9fps)");
     return ESP_OK;
 }

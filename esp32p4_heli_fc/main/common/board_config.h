@@ -24,7 +24,7 @@
 #define PIN_SENSOR_CS_MAG       29
 #define SENSOR_SPI_HOST         SPI3_HOST
 
-/* ── I2C0 (Camera SCCB only) ────────────────────────────────────── */
+/* ── I2C0 (Thermal Camera CCI) ──────────────────────────────────── */
 #define PIN_I2C_SDA         7
 #define PIN_I2C_SCL         8
 #define I2C_PORT            I2C_NUM_0
@@ -58,7 +58,7 @@
 
 /* ── Thermal Camera: FLIR Lepton 3.5 (SparkFun Breakout) ────────── */
 /* VoSPI: shares SPI3_HOST with IMU/MAG (bus serialized by ESP-IDF)
- * CCI:   shares I2C0 with camera SCCB
+ * CCI:   I2C0 (no contention — USB webcam uses separate USB transport)
  * Note: SparkFun breakout has no RST pin — Lepton resets via I2C CCI */
 #define PIN_LEPTON_CS       31        /* was: Status LED */
 #define LEPTON_SPI_HOST     SENSOR_SPI_HOST   /* SPI3_HOST shared */

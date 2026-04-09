@@ -146,8 +146,8 @@ static void sensor_task(void *param)
 
     bool mprls_ok = false;  /* MPRLS not connected */
 
-    /* Signal camera that sensor init is complete — safe to use I2C/SCCB now */
-    ESP_LOGI(TAG, "Sensor init complete, releasing I2C for camera SCCB");
+    /* Signal thermal camera that SPI bus init is complete */
+    ESP_LOGI(TAG, "Sensor init complete, releasing SPI bus for Lepton");
     i2c_sync_sensors_done();
 
     /* GPS init (starts its own internal UART parser task) */
