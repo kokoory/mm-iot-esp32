@@ -1,9 +1,11 @@
 /*
- * Thermal Camera — FLIR Lepton via PureThermal USB UVC
+ * USB Camera — Logitech C920 (or compatible UVC webcam)
  *
- * USB Host UVC driver receives Y16 frames at ~9fps.
- * Resolution is auto-negotiated (80x60 or 160x120).
+ * USB Host UVC driver receives MJPEG frames.
  * Frames are double-buffered in PSRAM for thread-safe access.
+ *
+ * Previously: FLIR Lepton via PureThermal (Y16 160x120 @9fps)
+ * Now: Logitech C920 (MJPEG 640x480 @15fps)
  */
 
 #include "thermal_camera.h"
@@ -17,19 +19,24 @@
 #include "usb/usb_host.h"
 #include "usb/uvc_host.h"
 
-static const char *TAG = "thermal_cam";
+static const char *TAG = "usb_cam";
 
-/* UVC_VS_FORMAT_Y16 is added to the enum by tools/patch_uvc_y16.py.
- * Redeclare here matching the patched enum value (after H265=4). */
-#define UVC_VS_FORMAT_Y16_VAL 5
+/* USB camera configuration — Logitech C920 */
+#define USB_CAM_VID         0x046D  /* Logitech */
+#define USB_CAM_PID         0x082D  /* C920 HD Pro Webcam */
+#define USB_CAM_WIDTH       640
+#define USB_CAM_HEIGHT      480
+#define USB_CAM_FPS         15
+#define USB_CAM_MAX_FRAME   (100 * 1024)  /* 100KB max MJPEG frame */
 
 /* Negotiated resolution (set after stream open) */
 static unsigned s_width = 0;
 static unsigned s_height = 0;
 static size_t s_frame_size = 0;
 
-/* Double buffer in PSRAM */
-static uint16_t *s_frame_buf = NULL;
+/* Double buffer in PSRAM (MJPEG frames are variable size) */
+static uint8_t *s_frame_buf = NULL;
+static size_t s_frame_len = 0;         /* Actual MJPEG frame length */
 static SemaphoreHandle_t s_frame_mutex = NULL;
 static bool s_frame_valid = false;
 static bool s_active = false;
@@ -69,32 +76,36 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
 {
     static uint32_t s_frame_count = 0;
 
-    if (!frame || !frame->data || !s_frame_size) return true;
+    if (!frame || !frame->data || frame->data_len == 0) return true;
 
     s_frame_count++;
     if (s_frame_count == 1) {
-        /* First frame: dump format diagnostics to help identify Y16 vs YUY2 */
         const uint8_t *p = (const uint8_t *)frame->data;
-        const uint16_t *u16 = (const uint16_t *)frame->data;
-        ESP_LOGI(TAG, "First frame: len=%u expect=%u  bytes[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x  u16[0..3]=%u %u %u %u",
-                 (unsigned)frame->data_len, (unsigned)s_frame_size,
-                 p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
-                 u16[0], u16[1], u16[2], u16[3]);
+        ESP_LOGI(TAG, "First frame: len=%u  bytes[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x",
+                 (unsigned)frame->data_len,
+                 p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        /* MJPEG should start with FF D8 (SOI marker) */
+        if (p[0] == 0xFF && p[1] == 0xD8) {
+            ESP_LOGI(TAG, "MJPEG format confirmed (SOI marker)");
+        } else {
+            ESP_LOGW(TAG, "Unexpected format — not MJPEG?");
+        }
     }
-    if ((s_frame_count % 90) == 0) {
-        ESP_LOGI(TAG, "Thermal frame #%lu  len=%u",
+    if ((s_frame_count % 150) == 0) {
+        ESP_LOGI(TAG, "USB cam frame #%lu  len=%u",
                  (unsigned long)s_frame_count, (unsigned)frame->data_len);
     }
 
-    /* Copy to double buffer under mutex — keep callback fast to avoid overflow */
+    /* Copy to double buffer under mutex */
     if (xSemaphoreTake(s_frame_mutex, 0) == pdTRUE) {
-        size_t copy_len = (frame->data_len < s_frame_size) ? frame->data_len : s_frame_size;
+        size_t copy_len = (frame->data_len < USB_CAM_MAX_FRAME) ? frame->data_len : USB_CAM_MAX_FRAME;
         memcpy(s_frame_buf, frame->data, copy_len);
+        s_frame_len = copy_len;
         s_frame_valid = true;
         xSemaphoreGive(s_frame_mutex);
     }
 
-    return true;  /* Driver can reclaim frame buffer immediately */
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -108,7 +119,7 @@ static void uvc_stream_callback(const uvc_host_stream_event_data_t *event, void 
         ESP_LOGW(TAG, "UVC transfer error");
         break;
     case UVC_HOST_DEVICE_DISCONNECTED:
-        ESP_LOGW(TAG, "PureThermal disconnected");
+        ESP_LOGW(TAG, "USB camera disconnected");
         s_active = false;
         break;
     case UVC_HOST_FRAME_BUFFER_OVERFLOW:
@@ -160,68 +171,65 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         return ret;
     }
 
-    /* Open UVC stream — PureThermal Lepton
-     * Request Y16 (16-bit grayscale) format explicitly for radiometric data.
-     * UVC_VS_FORMAT_Y16 is added by tools/patch_uvc_y16.py at build time.
-     * Pre-allocate frame buffers for max possible size (160x120 Y16). */
-    const size_t max_frame_size = 160 * 120 * 2;
+    /* Open UVC stream — Logitech C920 (or any UVC webcam)
+     * Request MJPEG format for compressed video.
+     * If VID/PID match fails, retry with VID/PID=0 to accept any UVC device. */
     uvc_host_stream_config_t stream_config = {
         .event_cb = uvc_stream_callback,
         .frame_cb = uvc_frame_callback,
         .user_ctx = NULL,
         .usb = {
-            .vid = 0x1E4E,  /* GroupGets PureThermal VID */
-            .pid = 0x0100,  /* PureThermal PID */
+            .vid = USB_CAM_VID,
+            .pid = USB_CAM_PID,
         },
         .vs_format = {
-            .h_res = 160,   /* Lepton 3.5 native 160x120 */
-            .v_res = 120,
-            .fps = 9,       /* ~9fps for Lepton */
-            .format = UVC_VS_FORMAT_Y16_VAL,
+            .h_res = USB_CAM_WIDTH,
+            .v_res = USB_CAM_HEIGHT,
+            .fps = USB_CAM_FPS,
+            .format = UVC_VS_FORMAT_MJPEG,
         },
         .advanced = {
             .number_of_frame_buffers = 3,
-            .frame_size = max_frame_size,
+            .frame_size = USB_CAM_MAX_FRAME,
             .frame_heap_caps = MALLOC_CAP_SPIRAM,
-            .number_of_urbs = 3,
-            .urb_size = 10 * 1024,
+            .number_of_urbs = 5,
+            .urb_size = 20 * 1024,  /* Larger URBs for MJPEG data */
         },
     };
 
-    ESP_LOGI(TAG, "Waiting for PureThermal USB connection (Y16 160x120)...");
+    ESP_LOGI(TAG, "Waiting for USB camera (VID=0x%04X PID=0x%04X MJPEG %dx%d@%dfps)...",
+             USB_CAM_VID, USB_CAM_PID, USB_CAM_WIDTH, USB_CAM_HEIGHT, USB_CAM_FPS);
     ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
     if (ret != ESP_OK) {
-        /* Y16 not matched — retry with DEFAULT to accept any format */
-        ESP_LOGW(TAG, "Y16 open failed (%s), retrying with DEFAULT format...",
+        /* Exact VID/PID failed — retry accepting any UVC device */
+        ESP_LOGW(TAG, "C920 open failed (%s), retrying with any UVC device...",
                  esp_err_to_name(ret));
-        stream_config.vs_format.format = 0;  /* device default */
+        stream_config.usb.vid = 0;
+        stream_config.usb.pid = 0;
         ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "UVC stream open failed: %s (is PureThermal connected?)",
+            ESP_LOGW(TAG, "UVC stream open failed: %s (is USB camera connected?)",
                      esp_err_to_name(ret));
             return ret;
         }
     }
 
-    /* Use requested resolution (uvc_host_stream_format_get is v2.3+ only) */
     s_width = stream_config.vs_format.h_res;
     s_height = stream_config.vs_format.v_res;
-    s_frame_size = s_width * s_height * 2;  /* Y16 = 2 bytes/pixel */
-    ESP_LOGI(TAG, "Opened: %ux%u (format=%d, frame=%u bytes)",
-             s_width, s_height, stream_config.vs_format.format, (unsigned)s_frame_size);
+    s_frame_size = USB_CAM_MAX_FRAME;  /* MJPEG: variable size, allocate max */
+    ESP_LOGI(TAG, "Opened: %ux%u MJPEG @%dfps (max frame=%uKB)",
+             s_width, s_height, stream_config.vs_format.fps,
+             (unsigned)(s_frame_size / 1024));
 
-    /* Allocate frame buffer in PSRAM to match actual resolution */
+    /* Allocate frame buffer in PSRAM */
     s_frame_buf = heap_caps_calloc(1, s_frame_size, MALLOC_CAP_SPIRAM);
     if (!s_frame_buf) {
         ESP_LOGE(TAG, "Failed to allocate frame buffer (%u bytes)", (unsigned)s_frame_size);
         return ESP_ERR_NO_MEM;
     }
 
-    /* RTP disabled — raw Y16 broadcast eats ~340KB/s, unusable by any player.
-     * Thermal data is served on-demand via HTTP /thermal/raw instead. */
-
     s_active = true;
-    ESP_LOGI(TAG, "PureThermal Lepton connected (%ux%u)", s_width, s_height);
+    ESP_LOGI(TAG, "USB camera connected (%ux%u MJPEG)", s_width, s_height);
     return ESP_OK;
 }
 
@@ -249,7 +257,23 @@ bool thermal_camera_get_frame(uint16_t *buf)
 
     if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (s_frame_valid) {
-            memcpy(buf, s_frame_buf, s_frame_size);
+            memcpy(buf, s_frame_buf, s_frame_len);
+            xSemaphoreGive(s_frame_mutex);
+            return true;
+        }
+        xSemaphoreGive(s_frame_mutex);
+    }
+    return false;
+}
+
+bool thermal_camera_get_jpeg(uint8_t *buf, size_t buf_size, size_t *out_len)
+{
+    if (!s_frame_valid || !s_frame_mutex) return false;
+
+    if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (s_frame_valid && s_frame_len <= buf_size) {
+            memcpy(buf, s_frame_buf, s_frame_len);
+            *out_len = s_frame_len;
             xSemaphoreGive(s_frame_mutex);
             return true;
         }

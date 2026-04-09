@@ -1,13 +1,11 @@
 /*
- * Thermal Camera (FLIR Lepton via PureThermal USB UVC)
+ * USB Camera (Logitech C920 or compatible UVC webcam)
  *
- * Receives thermal frames via USB Host UVC.
- * PureThermal presents Lepton as a standard UVC webcam.
- * Frame format: Y16 (16-bit per pixel, raw radiometric data)
+ * Receives MJPEG frames via USB Host UVC driver.
+ * Frames are double-buffered in PSRAM for thread-safe access.
  *
- * Resolution depends on Lepton model:
- *   Lepton 2/3:   80x60
- *   Lepton 3.5: 160x120 (or 80x60 default)
+ * Previously: FLIR Lepton via PureThermal (Y16 160x120 @9fps)
+ * Now: Logitech C920 (MJPEG 640x480 @15fps)
  */
 #pragma once
 
@@ -15,29 +13,35 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Callback invoked on each new thermal frame */
+/* Callback invoked on each new frame */
 typedef void (*thermal_frame_cb_t)(const uint16_t *frame_data, size_t len, void *user_ctx);
 
 /**
- * Initialize USB Host and UVC driver, open PureThermal stream.
+ * Initialize USB Host and UVC driver, open webcam stream.
  * Resolution and format are auto-negotiated with the device.
  */
 esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx);
 
-/** Start streaming thermal frames. */
+/** Start streaming frames. */
 esp_err_t thermal_camera_start(void);
 
 /** Stop streaming. */
 esp_err_t thermal_camera_stop(void);
 
 /**
- * Get latest frame (thread-safe copy).
+ * Get latest frame (thread-safe copy) — legacy Y16 API.
  * buf must be at least thermal_camera_frame_size() bytes.
  * Returns true if a valid frame was copied.
  */
 bool thermal_camera_get_frame(uint16_t *buf);
 
-/** Check if thermal camera is connected and streaming. */
+/**
+ * Get latest MJPEG frame (thread-safe copy).
+ * Returns actual JPEG data length in *out_len.
+ */
+bool thermal_camera_get_jpeg(uint8_t *buf, size_t buf_size, size_t *out_len);
+
+/** Check if USB camera is connected and streaming. */
 bool thermal_camera_is_active(void);
 
 /** Get negotiated resolution. Returns 0 before init. */
