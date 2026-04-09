@@ -5,7 +5,7 @@
  *   VoSPI: SPI3_HOST shared with IMU/MAG (20MHz, Mode 3)
  *   CCI:   I2C0 shared with camera SCCB (address 0x2A)
  *   CS:    PIN_LEPTON_CS (GPIO 31)
- *   RST:   PIN_LEPTON_RST (GPIO 52)
+ *   Note:  SparkFun breakout has no RST pin (reset via I2C CCI)
  *
  * Lepton 3.5: 160x120 @ ~9fps, Grey14 (2 bytes/pixel)
  * VoSPI frame = 4 segments x 60 packets x 164 bytes = 39,360 bytes
@@ -170,10 +170,18 @@ static bool lep_check_boot(void)
 
 static void lepton_vospi_task(void *arg)
 {
-    /* Working buffer for one VoSPI packet */
-    uint8_t pkt[LEP_PKT_SIZE];
+    /* Working buffer for one VoSPI packet (DMA-capable, internal RAM) */
+    uint8_t *pkt = heap_caps_malloc(LEP_PKT_SIZE, MALLOC_CAP_DMA);
+    if (!pkt) {
+        ESP_LOGE(TAG, "Failed to allocate VoSPI packet buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+    /* Full-duplex: Lepton ignores MOSI, we only care about MISO.
+     * Use length (not rxlength) so both TX and RX phases run together. */
     spi_transaction_t trans = {
         .length = LEP_PKT_SIZE * 8,
+        .rxlength = 0,              /* 0 = same as length */
         .rx_buffer = pkt,
         .tx_buffer = NULL,
     };
@@ -289,24 +297,12 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     if (s_lep.initialized) return ESP_OK;
 
     ESP_LOGI(TAG, "Initializing FLIR Lepton 3.5 (SPI VoSPI + I2C CCI)");
-    ESP_LOGI(TAG, "  CS=GPIO%d, RST=GPIO%d, SPI=%d, I2C=0x%02X",
-             PIN_LEPTON_CS, PIN_LEPTON_RST, LEPTON_SPI_HOST, LEPTON_I2C_ADDR);
+    ESP_LOGI(TAG, "  CS=GPIO%d, SPI=%d, I2C=0x%02X",
+             PIN_LEPTON_CS, LEPTON_SPI_HOST, LEPTON_I2C_ADDR);
 
-    /* RST pin — active low */
-    gpio_config_t rst_conf = {
-        .pin_bit_mask = (1ULL << PIN_LEPTON_RST),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&rst_conf);
-
-    /* Hardware reset */
-    gpio_set_level(PIN_LEPTON_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level(PIN_LEPTON_RST, 1);
-    ESP_LOGI(TAG, "Lepton reset released, waiting %dms for boot...", LEP_BOOT_WAIT_MS);
+    /* No hardware RST — SparkFun breakout doesn't expose it.
+     * Lepton boots on power-up; CCI reset available if needed. */
+    ESP_LOGI(TAG, "Waiting %dms for Lepton boot...", LEP_BOOT_WAIT_MS);
     vTaskDelay(pdMS_TO_TICKS(LEP_BOOT_WAIT_MS));
 
     /* Wait for sensor I2C bus to be ready */
@@ -319,7 +315,7 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         .mode = 3,  /* CPOL=1, CPHA=1 */
         .spics_io_num = PIN_LEPTON_CS,
         .queue_size = 1,
-        .flags = SPI_DEVICE_HALFDUPLEX,  /* Lepton only sends data */
+        .flags = 0,  /* Full-duplex: Lepton ignores MOSI, reads MISO */
     };
     esp_err_t ret = spi_bus_add_device(LEPTON_SPI_HOST, &spi_cfg, &s_lep.spi_dev);
     if (ret != ESP_OK) {

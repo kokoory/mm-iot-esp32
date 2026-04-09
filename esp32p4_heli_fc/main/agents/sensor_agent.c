@@ -86,7 +86,7 @@ static esp_err_t init_sensor_spi_bus(void)
         .sclk_io_num = PIN_SENSOR_SPI_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 64,
+        .max_transfer_sz = 256,  /* IMU/MAG need 64B, Lepton VoSPI needs 164B */
     };
 
     esp_err_t err = spi_bus_initialize(SENSOR_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);

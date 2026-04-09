@@ -48,7 +48,7 @@
 #define PIN_TAIL_ESC        50        /* Tail rotor ESC signal */
 #define PIN_MAIN_ESC        51        /* Main rotor ESC signal */
 
-/* ── Battery ADC (DISABLED — pin reassigned to Lepton) ───────────── */
+/* ── Battery ADC (DISABLED — pin not used) ───────────────────────── */
 // #define PIN_BATT_ADC        52
 // #define BATT_ADC_ATTEN      ADC_ATTEN_DB_12
 // #define BATT_VOLTAGE_DIVIDER_RATIO  11.0f
@@ -58,9 +58,9 @@
 
 /* ── Thermal Camera: FLIR Lepton 3.5 (SparkFun Breakout) ────────── */
 /* VoSPI: shares SPI3_HOST with IMU/MAG (bus serialized by ESP-IDF)
- * CCI:   shares I2C0 with camera SCCB */
+ * CCI:   shares I2C0 with camera SCCB
+ * Note: SparkFun breakout has no RST pin — Lepton resets via I2C CCI */
 #define PIN_LEPTON_CS       31        /* was: Status LED */
-#define PIN_LEPTON_RST      52        /* was: Battery ADC */
 #define LEPTON_SPI_HOST     SENSOR_SPI_HOST   /* SPI3_HOST shared */
 #define LEPTON_I2C_ADDR     0x2A      /* 7-bit CCI address */
 #define LEPTON_SPI_FREQ     20000000  /* 20 MHz VoSPI max */
