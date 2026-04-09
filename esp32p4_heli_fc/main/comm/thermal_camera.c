@@ -330,9 +330,9 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
             .glitch_ignore_cnt = 7,
             .flags.enable_internal_pullup = true,
         };
-        ret = i2c_new_master_bus(&i2c_cfg, &i2c_bus);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(ret));
+        esp_err_t i2c_ret = i2c_new_master_bus(&i2c_cfg, &i2c_bus);
+        if (i2c_ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(i2c_ret));
             ESP_LOGW(TAG, "Lepton CCI unavailable — VoSPI may still work");
         } else {
             ESP_LOGI(TAG, "I2C bus created (SCL=%d, SDA=%d) for Lepton CCI",
