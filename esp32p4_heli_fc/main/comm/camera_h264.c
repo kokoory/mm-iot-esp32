@@ -83,9 +83,10 @@ static const char *TAG = "camera_h264";
 #define H264_BITRATE        350000
 #define H264_BUF_SIZE       (100 * 1024)
 
-/* MJPEG encoder settings (primary — no I-frame burst, smooth SPI traffic) */
-#define MJPEG_QUALITY       40           /* JPEG quality 1-100 (40 at 400x320 ≈ 3-5KB) */
-#define MJPEG_FPS           2            /* 2 FPS — minimal SPI pressure */
+/* MJPEG encoder settings — encode at full capture resolution (no downscale).
+ * 800x640 Q=20 ≈ 6-10KB per frame, fits HaLow ~15KB/s throughput at 1fps. */
+#define MJPEG_QUALITY       20
+#define MJPEG_FPS           1
 
 /* H.264 delivered via UDP RTP + HTTP/TCP backup */
 #define RTP_PORT            5600
@@ -1229,23 +1230,10 @@ static void camera_capture_task(void *arg)
         esp_cache_msync(frame_data, s_cam.raw_buf_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        /* Software 2x downscale for MJPEG: capture res → stream res.
-         * H.264 uses full capture resolution directly. */
-#if ENABLE_MJPEG
-#if !defined(JPEG_ENCODE_IN_FORMAT_YUV420)
-        downscale_2x_yuv422(frame_data, s_cam.scale_buf,
-                            CAM_CAPTURE_W, CAM_CAPTURE_H);
-#else
-        downscale_2x_yuv420(frame_data, s_cam.scale_buf,
-                            CAM_CAPTURE_W, CAM_CAPTURE_H);
-#endif
-        /* Flush downscaled buffer to PSRAM for HW encoder DMA access */
-        esp_cache_msync(s_cam.scale_buf, s_cam.scale_buf_size,
-                        ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        uint8_t *encode_data = s_cam.scale_buf;
-#endif /* ENABLE_MJPEG */
-
-        /* === MJPEG encode → send via UDP RTP (Primary path) === */
+        /* === MJPEG encode at full capture resolution ===
+         * Skip software downscale — pass ISP output directly to HW JPEG
+         * encoder. ISP and JPEG are both ESP-IDF components with matching
+         * YUV format. Downscale was causing byte order mismatch (gray screen). */
         int64_t t2 = t1;
         int64_t t4 = t1;
         size_t h264_size_out = 0;
@@ -1253,28 +1241,27 @@ static void camera_capture_task(void *arg)
         if (s_cam.jpeg_handle) {
             int wr_idx = s_cam.jpeg_write_idx;
 
-            /* Try YUV420 first (ESP-IDF v5.4+), fall back to YUV422 */
 #ifdef JPEG_ENCODE_IN_FORMAT_YUV420
             jpeg_encode_cfg_t jpeg_cfg = {
                 .src_type = JPEG_ENCODE_IN_FORMAT_YUV420,
                 .sub_sample = JPEG_DOWN_SAMPLING_YUV420,
                 .image_quality = MJPEG_QUALITY,
-                .width = CAM_WIDTH,
-                .height = CAM_HEIGHT,
+                .width = CAM_CAPTURE_W,
+                .height = CAM_CAPTURE_H,
             };
 #else
             jpeg_encode_cfg_t jpeg_cfg = {
                 .src_type = JPEG_ENCODE_IN_FORMAT_YUV422,
                 .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
                 .image_quality = MJPEG_QUALITY,
-                .width = CAM_WIDTH,
-                .height = CAM_HEIGHT,
+                .width = CAM_CAPTURE_W,
+                .height = CAM_CAPTURE_H,
             };
 #endif
 
             uint32_t jpg_size = 0;
             esp_err_t ret = jpeg_encoder_process(s_cam.jpeg_handle, &jpeg_cfg,
-                                                  encode_data, s_cam.scale_buf_size,
+                                                  frame_data, s_cam.raw_buf_size,
                                                   s_cam.jpeg_buf[wr_idx], JPEG_BUF_SIZE,
                                                   &jpg_size);
             t4 = esp_timer_get_time();
@@ -1442,7 +1429,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"pipeline\":\"csi_isp_mjpeg\","
         "\"stream_url\":\"/mjpeg\"}",
         s_cam.initialized ? "true" : "false",
-        CAM_WIDTH, CAM_HEIGHT, s_cam.fps,
+        CAM_CAPTURE_W, CAM_CAPTURE_H, s_cam.fps,
         MJPEG_QUALITY, s_cam.mjpeg_clients,
         app_wlan_tx_is_paused() ? "true" : "false",
         (unsigned long)app_wlan_tx_pause_count());

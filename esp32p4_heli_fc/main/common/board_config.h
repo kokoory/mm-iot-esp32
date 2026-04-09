@@ -63,7 +63,7 @@
 #define PIN_LEPTON_CS       31        /* was: Status LED */
 #define LEPTON_SPI_HOST     SENSOR_SPI_HOST   /* SPI3_HOST shared */
 #define LEPTON_I2C_ADDR     0x2A      /* 7-bit CCI address */
-#define LEPTON_SPI_FREQ     20000000  /* 20 MHz VoSPI max */
+#define LEPTON_SPI_FREQ     10000000  /* 10 MHz — conservative for signal integrity */
 
 /* ── Task Priorities ─────────────────────────────────────────────── */
 #define SENSOR_TASK_PRIORITY    6

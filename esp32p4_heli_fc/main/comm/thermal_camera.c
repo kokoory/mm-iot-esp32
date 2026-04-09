@@ -177,8 +177,6 @@ static void lepton_vospi_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    /* Full-duplex: Lepton ignores MOSI, we only care about MISO.
-     * Use length (not rxlength) so both TX and RX phases run together. */
     spi_transaction_t trans = {
         .length = LEP_PKT_SIZE * 8,
         .rxlength = 0,              /* 0 = same as length */
@@ -192,6 +190,15 @@ static void lepton_vospi_task(void *arg)
     ESP_LOGI(TAG, "VoSPI task started — reading 160x120 Grey14 @~9fps");
 
     while (1) {
+        /* CRITICAL: Acquire SPI bus for the entire frame.
+         * VoSPI requires uninterrupted CS-low during all 240 packets.
+         * Without this, IMU/MAG transactions interrupt CS → sync loss. */
+        esp_err_t acq = spi_device_acquire_bus(s_lep.spi_dev, pdMS_TO_TICKS(200));
+        if (acq != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
         /* Assemble one frame: 4 segments × 60 packets */
         bool frame_ok = true;
 
@@ -199,7 +206,7 @@ static void lepton_vospi_task(void *arg)
             bool discard_seg = false;
 
             for (int pkt_num = 0; pkt_num < LEP_PKTS_PER_SEG && frame_ok; ) {
-                esp_err_t err = spi_device_transmit(s_lep.spi_dev, &trans);
+                esp_err_t err = spi_device_polling_transmit(s_lep.spi_dev, &trans);
                 if (err != ESP_OK) {
                     ESP_LOGE(TAG, "SPI read failed: %s", esp_err_to_name(err));
                     frame_ok = false;
@@ -215,14 +222,12 @@ static void lepton_vospi_task(void *arg)
                         /* No frame in progress — wait and retry */
                         frame_ok = false;
                     }
-                    /* Mid-frame discard: retry same packet number */
                     continue;
                 }
 
                 uint16_t packet_num = id & 0x0FFF;
                 uint8_t ttt = (id >> 12) & 0x07;
 
-                /* Validate packet number */
                 if (packet_num != pkt_num) {
                     ESP_LOGD(TAG, "Packet mismatch: got %d expect %d (seg %d)", packet_num, pkt_num, seg);
                     frame_ok = false;
@@ -230,10 +235,8 @@ static void lepton_vospi_task(void *arg)
                     break;
                 }
 
-                /* Segment validation on packet 20 */
                 if (pkt_num == 20) {
                     if (ttt == 0) {
-                        /* Segment number 0 = discard this segment */
                         discard_seg = true;
                     } else if (ttt != seg) {
                         ESP_LOGD(TAG, "Segment mismatch: ttt=%d expect=%d", ttt, seg);
@@ -243,7 +246,6 @@ static void lepton_vospi_task(void *arg)
                     }
                 }
 
-                /* Copy pixel data (skip 4-byte header) to assembly buffer */
                 size_t offset = ((seg - 1) * LEP_PKTS_PER_SEG + pkt_num) * LEP_PKT_DATA;
                 memcpy(s_lep.vospi_buf + offset, pkt + LEP_PKT_HEADER, LEP_PKT_DATA);
 
@@ -251,17 +253,21 @@ static void lepton_vospi_task(void *arg)
             }
 
             if (discard_seg) {
-                seg--;  /* Retry this segment */
+                seg--;
             }
         }
 
+        /* Release SPI bus ASAP so IMU/MAG can operate between frames */
+        spi_device_release_bus(s_lep.spi_dev);
+
         if (!frame_ok) {
             if (!synced) {
-                /* Resync: hold CS HIGH for ≥185ms */
+                /* Resync: CS is already HIGH (bus released).
+                 * Wait ≥185ms per VoSPI spec for Lepton to reset sync. */
                 s_lep.resync_count++;
                 ESP_LOGD(TAG, "VoSPI resync #%lu", (unsigned long)s_lep.resync_count);
                 vTaskDelay(pdMS_TO_TICKS(LEP_RESYNC_MS));
-                synced = true;  /* Will attempt sync on next iteration */
+                synced = true;
             } else {
                 vTaskDelay(pdMS_TO_TICKS(1));
             }
@@ -278,9 +284,12 @@ static void lepton_vospi_task(void *arg)
             xSemaphoreGive(s_lep.frame_mutex);
         }
 
+        /* Brief yield between frames — let IMU/MAG read sensors */
+        vTaskDelay(pdMS_TO_TICKS(2));
+
         /* Periodic stats */
         int64_t now_us = esp_timer_get_time();
-        if (now_us - last_log_us > 10000000) {  /* Every 10s */
+        if (now_us - last_log_us > 10000000) {
             ESP_LOGI(TAG, "Lepton: %lu frames, %lu discards, %lu resyncs",
                      (unsigned long)s_lep.frame_count,
                      (unsigned long)s_lep.discard_count,
