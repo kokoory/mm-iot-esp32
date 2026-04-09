@@ -12,14 +12,14 @@
  *                  46,47,48,49,50,51,52
  *
  * HaLow (MMECH06): GPIO 2,3,4,5,20,21,23,32 (SPI2_HOST)
- * Sensor SPI:      GPIO 24=SCLK, 25=MOSI, 26=MISO (SPI3_HOST)
+ * Sensor SPI:      GPIO 22=SCLK, 52=MOSI, 30=MISO (SPI3_HOST)
  * I2C (camera):    GPIO 7=SDA, 8=SCL
  */
 
-/* ── Sensor SPI Bus (ISM330DHCX + LIS3MDL) ──────────────────────── */
-#define PIN_SENSOR_SPI_SCLK     24
-#define PIN_SENSOR_SPI_MOSI     25
-#define PIN_SENSOR_SPI_MISO     26
+/* ── Sensor SPI Bus (ISM330DHCX + LIS3MDL + Lepton) ─────────────── */
+#define PIN_SENSOR_SPI_SCLK     22
+#define PIN_SENSOR_SPI_MOSI     52
+#define PIN_SENSOR_SPI_MISO     30
 #define PIN_SENSOR_CS_IMU       28
 #define PIN_SENSOR_CS_MAG       29
 #define SENSOR_SPI_HOST         SPI3_HOST
@@ -48,8 +48,8 @@
 #define PIN_TAIL_ESC        50        /* Tail rotor ESC signal */
 #define PIN_MAIN_ESC        51        /* Main rotor ESC signal */
 
-/* ── Battery ADC (DISABLED — pin not used) ───────────────────────── */
-// #define PIN_BATT_ADC        52
+/* ── Battery ADC (DISABLED) ──────────────────────────────────────── */
+// #define PIN_BATT_ADC        (unused)
 // #define BATT_ADC_ATTEN      ADC_ATTEN_DB_12
 // #define BATT_VOLTAGE_DIVIDER_RATIO  11.0f
 
