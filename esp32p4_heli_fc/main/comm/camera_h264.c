@@ -35,6 +35,11 @@ static const char *TAG = "usb_cam";
 #define USB_CAM_FPS         15
 #define USB_CAM_MAX_FRAME   (100 * 1024)  /* 100KB max MJPEG frame */
 
+/* Stream target FPS over HaLow — ~43KB/frame, HaLow ~100KB/s effective.
+ * 2fps x 43KB = 86KB/s fits comfortably within HaLow bandwidth. */
+#define STREAM_TARGET_FPS   2
+#define STREAM_INTERVAL_MS  (1000 / STREAM_TARGET_FPS)
+
 /* Double buffer for MJPEG frames */
 #define NUM_BUFS            2
 
@@ -49,6 +54,10 @@ static struct {
     volatile int jpeg_read_idx;
     SemaphoreHandle_t frame_ready;
     SemaphoreHandle_t jpeg_mutex;
+
+    /* Send buffer — frame is copied here under mutex before slow TCP send */
+    uint8_t *send_buf;
+    size_t send_buf_size;
 
     /* Frame statistics */
     volatile float fps;
@@ -178,7 +187,15 @@ esp_err_t camera_h264_init(void)
             return ESP_ERR_NO_MEM;
         }
     }
-    ESP_LOGI(TAG, "MJPEG buffers: %d x %uKB (PSRAM)", NUM_BUFS,
+    /* Send buffer: frame copied here under mutex before slow TCP send */
+    s_cam.send_buf = heap_caps_calloc(1, USB_CAM_MAX_FRAME, MALLOC_CAP_SPIRAM);
+    if (!s_cam.send_buf) {
+        ESP_LOGE(TAG, "Failed to allocate send buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "MJPEG buffers: %d x %uKB + send %uKB (PSRAM)", NUM_BUFS,
+             (unsigned)(USB_CAM_MAX_FRAME / 1024),
              (unsigned)(USB_CAM_MAX_FRAME / 1024));
 
     /* Install USB Host Library */
@@ -324,10 +341,12 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
 
     s_cam.mjpeg_clients++;
-    ESP_LOGI(TAG, "MJPEG HTTP client connected (%d active)", s_cam.mjpeg_clients);
+    ESP_LOGI(TAG, "MJPEG HTTP client connected (%d active, %dfps target)",
+             s_cam.mjpeg_clients, STREAM_TARGET_FPS);
 
     esp_err_t res = ESP_OK;
     char part_hdr[128];
+    int64_t last_send_us = 0;
 
     while (res == ESP_OK) {
         /* Wait for a new JPEG frame from UVC callback */
@@ -335,30 +354,41 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
             continue;  /* Timeout — keep connection alive, try again */
         }
 
-        /* Read the latest JPEG frame under mutex */
-        int rd_idx;
-        size_t jpg_len = 0;
-        uint8_t *jpg_data = NULL;
+        /* Drain extra semaphore signals (USB cam runs at 15fps,
+         * we only send at STREAM_TARGET_FPS) */
+        while (xSemaphoreTake(s_cam.frame_ready, 0) == pdTRUE) { }
 
+        /* Frame rate throttle: skip if too soon since last send */
+        int64_t now_us = esp_timer_get_time();
+        if ((now_us - last_send_us) < (STREAM_INTERVAL_MS * 1000)) {
+            continue;
+        }
+
+        /* Copy frame to send buffer under mutex — prevents race condition
+         * where UVC callback overwrites jpeg_buf during slow TCP send */
+        size_t send_len = 0;
         if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            rd_idx = s_cam.jpeg_read_idx;
-            jpg_len = s_cam.jpeg_size[rd_idx];
-            jpg_data = s_cam.jpeg_buf[rd_idx];
+            int rd_idx = s_cam.jpeg_read_idx;
+            send_len = s_cam.jpeg_size[rd_idx];
+            if (send_len > 0 && send_len <= USB_CAM_MAX_FRAME) {
+                memcpy(s_cam.send_buf, s_cam.jpeg_buf[rd_idx], send_len);
+            }
             xSemaphoreGive(s_cam.jpeg_mutex);
         }
 
-        if (!jpg_data || jpg_len == 0) continue;
+        if (send_len == 0) continue;
 
         /* Send multipart boundary + JPEG content-type header */
         int hdr_len = snprintf(part_hdr, sizeof(part_hdr),
             "%sContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
-            STREAM_BOUNDARY, (unsigned)jpg_len);
+            STREAM_BOUNDARY, (unsigned)send_len);
 
         res = httpd_resp_send_chunk(req, part_hdr, hdr_len);
         if (res != ESP_OK) break;
 
-        /* Send JPEG data — TCP backpressure handles flow control */
-        res = httpd_resp_send_chunk(req, (const char *)jpg_data, jpg_len);
+        /* Send from send_buf — safe from UVC callback overwrites */
+        res = httpd_resp_send_chunk(req, (const char *)s_cam.send_buf, send_len);
+        last_send_us = esp_timer_get_time();
     }
 
     s_cam.mjpeg_clients--;
