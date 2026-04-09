@@ -98,8 +98,8 @@ static void halow_comm_task(void *param)
         ESP_LOGI(TAG, "MAVLink handler task started on Core %d", MAVLINK_TASK_CORE);
     }
 
-    /* === Camera + H.264 === */
-    ESP_LOGI(TAG, "Initializing MIPI-CSI camera + H.264...");
+    /* === USB Webcam === */
+    ESP_LOGI(TAG, "Initializing USB webcam...");
     err = camera_h264_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(err));

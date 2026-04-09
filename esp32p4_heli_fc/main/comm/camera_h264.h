@@ -1,11 +1,9 @@
 /*
- * MIPI-CSI Camera + HW JPEG/H.264 Encoder for ESP32-P4
+ * USB Webcam (Logitech C920) — MJPEG over HTTP/TCP
  *
- * Pipelines:
- *   MJPEG: OV5647 → MIPI-CSI → ISP (RAW8→RGB565) → HW JPEG → HTTP /
- *   H.264: OV5647 → MIPI-CSI → ISP (RAW8→RGB565) → HW H.264 → UDP RTP :5600
+ * Pipeline: USB UVC → MJPEG frames → double buffer → HTTP /mjpeg (port 81)
  *
- * Hardware: Waveshare ESP32-P4-WIFI6 + OV5647 (RPi Camera v1)
+ * Hardware: Logitech C920 (or any UVC-compatible USB webcam)
  */
 
 #pragma once
@@ -18,26 +16,26 @@ extern "C" {
 #endif
 
 /**
- * Initialize the MIPI-CSI camera and encoder pipeline.
+ * Initialize USB webcam pipeline.
  *
- * Configures: LDO → SCCB/I2C → OV5647 → CSI → ISP → JPEG + H.264 encoders.
- * Also creates a UDP RTP socket for H.264 streaming (broadcast port 5600).
+ * Configures: USB Host → UVC driver → MJPEG frame capture.
+ * Webcam outputs MJPEG natively — no ISP or HW encoder needed.
  *
  * @return ESP_OK on success, error code otherwise.
  */
 esp_err_t camera_h264_init(void);
 
 /**
- * Start the HTTP server and UDP RTP streaming.
+ * Start the HTTP server for video and thermal streaming.
  *
  * HTTP endpoints:
- *   GET /         - MJPEG stream (HW JPEG, for browser viewing)
+ *   GET /         - Landing page with embedded MJPEG viewer
  *   GET /status   - JSON status (fps, resolution, encoder info)
+ *   GET /thermal  - Thermal camera viewer (FLIR Lepton)
+ *   GET /thermal/raw - Raw Y16 thermal data
  *
- * UDP RTP:
- *   H.264 NALs broadcast to port 5600 (QGC/VLC)
- *   VLC: rtp://@:5600  or use SDP file
- *   QGC: Video Source = UDP h.264, port 5600
+ * MJPEG server (port 81):
+ *   GET /mjpeg    - MJPEG multipart stream (browser/VLC)
  *
  * @return HTTP server handle, or NULL on failure.
  */

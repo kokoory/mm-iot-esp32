@@ -39,7 +39,7 @@ CONFIG_MBEDTLS_NIST_KW_C=y
 # ── Timer profiling (matching reference) ──
 CONFIG_ESP_TIMER_PROFILING=y
 
-# ── USB Host (PureThermal Lepton has large UVC config descriptor) ──
+# ── USB Host (large control transfer for UVC config descriptor) ──
 CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=4096
 
 # ── Logging (use RTOS ticks for timestamps — system time triggers
