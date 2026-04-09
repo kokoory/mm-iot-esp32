@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Pipelines:
- *   H.264: OV5647 → MIPI-CSI → ISP (RAW8→YUV420) → HW H.264 → UDP RTP :5600
- *   MJPEG: (disabled by default, set ENABLE_MJPEG=1 to enable)
+ *   MJPEG: OV5647 → MIPI-CSI → ISP (RAW8→YUV422) → 2x downscale → HW JPEG → HTTP/TCP /mjpeg
+ *   H.264: (set ENABLE_MJPEG=0 to use) OV5647 → ISP (RAW8→YUV420) → HW H.264 → UDP RTP :5600
  *
  * References:
  *   - ESP-IDF examples/peripherals/camera/camera_dsi
@@ -99,7 +99,7 @@ static const char *TAG = "camera_h264";
 #define RTP_DEFAULT_DEST_IP "192.168.1.143"  /* Default GCS IP, updated by MAVLink heartbeat */
 
 /* Set to 1 to enable MJPEG, 0 for H.264 (primary) */
-#define ENABLE_MJPEG        0
+#define ENABLE_MJPEG        1
 
 /* Stream frame rate limit (camera captures at 50fps, we stream fewer) */
 #if ENABLE_MJPEG
@@ -1078,7 +1078,8 @@ esp_err_t camera_h264_init(void)
     ESP_LOGW(TAG, "Add espressif/esp_h264 to idf_component.yml");
 #endif
 
-    /* H.264 delivered via UDP RTP + HTTP/TCP backup */
+#if !ENABLE_MJPEG
+    /* H.264: UDP RTP + HTTP/TCP backup */
     s_cam.rtp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s_cam.rtp_sock >= 0) {
         memset(&s_cam.rtp_dest_addr, 0, sizeof(s_cam.rtp_dest_addr));
@@ -1094,6 +1095,12 @@ esp_err_t camera_h264_init(void)
     } else {
         ESP_LOGE(TAG, "Failed to create RTP UDP socket");
     }
+#else
+    /* MJPEG: HTTP/TCP only — no UDP socket needed.
+     * TCP backpressure prevents SPI overflow naturally. */
+    s_cam.rtp_sock = -1;
+    ESP_LOGI(TAG, "MJPEG mode: HTTP/TCP streaming only (no RTP/UDP)");
+#endif
 
     /* Start capture task */
     xTaskCreatePinnedToCore(camera_capture_task, "cam_task", 8192, NULL, 5,
@@ -1280,10 +1287,8 @@ static void camera_capture_task(void *arg)
                                 (jpg_size + 63) & ~63,
                                 ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-                /* Send via UDP RTP (Primary, Low Latency) */
-                rtp_send_jpeg_frame(s_cam.jpeg_buf[wr_idx], jpg_size);
-
-                /* Update MJPEG HTTP double buffer */
+                /* HTTP/TCP MJPEG: update double buffer for HTTP clients.
+                 * No RTP/UDP — TCP backpressure handles flow control. */
                 if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                     s_cam.jpeg_size[wr_idx] = jpg_size;
                     s_cam.jpeg_write_idx = (wr_idx + 1) % NUM_BUFS;
@@ -1361,8 +1366,18 @@ static void camera_capture_task(void *arg)
                          (long)(stat_h264_us / stat_frames / 1000),
                          (long)((stat_wait_us + stat_h264_us) / stat_frames / 1000),
                          (unsigned long)(stat_h264_bytes / 1024),
+#if ENABLE_MJPEG
+                         s_cam.mjpeg_clients);
+#else
                          s_cam.h264_clients);
+#endif
             }
+#if ENABLE_MJPEG
+            ESP_LOGI(TAG, "[mjpeg] http_clients=%d | tx_paused=%s pause_cnt=%lu",
+                     s_cam.mjpeg_clients,
+                     app_wlan_tx_is_paused() ? "YES" : "no",
+                     (unsigned long)app_wlan_tx_pause_count());
+#else
             ESP_LOGI(TAG, "[rtp] sent=%lu drop=%lu frames=%lu skip=%lu backoff=%lu | tx_paused=%s pause_cnt=%lu | gcs=%s dest=%s",
                      (unsigned long)s_cam.rtp_pkts_sent,
                      (unsigned long)s_cam.rtp_pkts_dropped,
@@ -1373,6 +1388,7 @@ static void camera_capture_task(void *arg)
                      (unsigned long)app_wlan_tx_pause_count(),
                      gcs_bridge_is_active() ? "active" : "INACTIVE",
                      inet_ntoa(s_cam.rtp_dest_addr.sin_addr));
+#endif
             stat_frames = 0;
             stat_wait_us = stat_h264_us = 0;
             stat_h264_bytes = 0;
@@ -1401,8 +1417,14 @@ static esp_err_t stream_handler(httpd_req_t *req)
     return httpd_resp_send(req,
         "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:40px'>"
         "<h2>ESP32-P4 Helicopter</h2>"
-        "<p style='color:#888;font-size:14px'>Primary: MJPEG RTP on port 5600 (RFC 2435)</p>"
+#if ENABLE_MJPEG
+        "<p style='color:#0f0;font-size:14px'>Primary: HTTP/TCP MJPEG (400x320)</p>"
+        "<p><a href='/mjpeg' style='color:#0af;font-size:20px'>Live Video (MJPEG)</a></p>"
+#else
+        "<p style='color:#888;font-size:14px'>Primary: H.264 RTP on port 5600</p>"
         "<p><a href='/stream.sdp' style='color:#0af;font-size:16px'>stream.sdp</a> — open in VLC</p>"
+        "<p><a href='/video' style='color:#0af;font-size:20px'>H.264 Stream</a></p>"
+#endif
         "<p><a href='/thermal' style='color:#0af;font-size:20px'>Thermal Camera</a></p>"
         "<p><a href='/status' style='color:#0af;font-size:20px'>System Status</a></p>"
         "</body></html>", HTTPD_RESP_USE_STRLEN);
@@ -1411,6 +1433,20 @@ static esp_err_t stream_handler(httpd_req_t *req)
 static esp_err_t status_handler(httpd_req_t *req)
 {
     char buf[896];
+#if ENABLE_MJPEG
+    snprintf(buf, sizeof(buf),
+        "{\"initialized\":%s,\"resolution\":\"%dx%d\",\"fps\":%.1f,"
+        "\"encoder\":\"mjpeg_hw\",\"transport\":\"http_tcp\","
+        "\"mjpeg_quality\":%d,\"mjpeg_clients\":%d,"
+        "\"tx_paused\":%s,\"tx_pause_count\":%lu,"
+        "\"pipeline\":\"csi_isp_mjpeg\","
+        "\"stream_url\":\"/mjpeg\"}",
+        s_cam.initialized ? "true" : "false",
+        CAM_WIDTH, CAM_HEIGHT, s_cam.fps,
+        MJPEG_QUALITY, s_cam.mjpeg_clients,
+        app_wlan_tx_is_paused() ? "true" : "false",
+        (unsigned long)app_wlan_tx_pause_count());
+#else
     snprintf(buf, sizeof(buf),
         "{\"initialized\":%s,\"resolution\":\"%dx%d\",\"fps\":%.1f,"
         "\"jpeg_encoder\":\"%s\",\"h264_encoder\":\"%s\","
@@ -1422,11 +1458,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"pipeline\":\"csi_isp\","
         "\"vlc\":\"rtp://@:%d\"}",
         s_cam.initialized ? "true" : "false",
-#if ENABLE_MJPEG
-        CAM_WIDTH, CAM_HEIGHT, s_cam.fps,
-#else
         CAM_CAPTURE_W, CAM_CAPTURE_H, s_cam.fps,
-#endif
 #if HAS_HW_JPEG
         "hw",
 #else
@@ -1448,6 +1480,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         (unsigned long)app_wlan_tx_pause_count(),
         gcs_bridge_is_active() ? "true" : "false",
         RTP_PORT);
+#endif
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -1538,6 +1571,67 @@ static esp_err_t h264_stream_handler(httpd_req_t *req)
 
     s_cam.h264_clients--;
     ESP_LOGI(TAG, "H.264 HTTP client disconnected (%d active)", s_cam.h264_clients);
+    return res;
+}
+
+/* ========== MJPEG HTTP Multipart Stream (TCP — primary video) ========== */
+
+/*
+ * Serve MJPEG as multipart/x-mixed-replace over HTTP/TCP.
+ * Browser/VLC: open http://<ip>/mjpeg
+ * TCP backpressure naturally prevents SPI overflow — no RTP congestion logic needed.
+ */
+static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
+{
+    if (!s_cam.initialized) {
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_send(req, "Camera not initialized", HTTPD_RESP_USE_STRLEN);
+    }
+
+    httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+
+    s_cam.mjpeg_clients++;
+    ESP_LOGI(TAG, "MJPEG HTTP client connected (%d active)", s_cam.mjpeg_clients);
+
+    esp_err_t res = ESP_OK;
+    char part_hdr[128];
+
+    while (res == ESP_OK) {
+        /* Wait for a new JPEG frame from the capture task */
+        if (xSemaphoreTake(s_cam.frame_ready, pdMS_TO_TICKS(5000)) != pdTRUE) {
+            continue;  /* Timeout — keep connection alive, try again */
+        }
+
+        /* Read the latest JPEG frame under mutex */
+        int rd_idx;
+        size_t jpg_len = 0;
+        uint8_t *jpg_data = NULL;
+
+        if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            rd_idx = s_cam.jpeg_read_idx;
+            jpg_len = s_cam.jpeg_size[rd_idx];
+            jpg_data = s_cam.jpeg_buf[rd_idx];
+            xSemaphoreGive(s_cam.jpeg_mutex);
+        }
+
+        if (!jpg_data || jpg_len == 0) continue;
+
+        /* Send multipart boundary + JPEG content-type header */
+        int hdr_len = snprintf(part_hdr, sizeof(part_hdr),
+            "%sContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+            STREAM_BOUNDARY, (unsigned)jpg_len);
+
+        res = httpd_resp_send_chunk(req, part_hdr, hdr_len);
+        if (res != ESP_OK) break;
+
+        /* Send JPEG data — TCP backpressure handles flow control */
+        res = httpd_resp_send_chunk(req, (const char *)jpg_data, jpg_len);
+    }
+
+    s_cam.mjpeg_clients--;
+    ESP_LOGI(TAG, "MJPEG HTTP client disconnected (%d active)", s_cam.mjpeg_clients);
     return res;
 }
 
@@ -1733,6 +1827,12 @@ static const httpd_uri_t uri_video = {
     .handler = h264_stream_handler,
 };
 
+static const httpd_uri_t uri_mjpeg = {
+    .uri = "/mjpeg",
+    .method = HTTP_GET,
+    .handler = mjpeg_stream_handler,
+};
+
 static const httpd_uri_t uri_sdp = {
     .uri = "/stream.sdp",
     .method = HTTP_GET,
@@ -1752,12 +1852,18 @@ httpd_handle_t camera_stream_server_start(void)
         httpd_register_uri_handler(server, &uri_stream);
         httpd_register_uri_handler(server, &uri_status);
         httpd_register_uri_handler(server, &uri_video);
+        httpd_register_uri_handler(server, &uri_mjpeg);
         httpd_register_uri_handler(server, &uri_sdp);
         httpd_register_uri_handler(server, &uri_thermal);
         httpd_register_uri_handler(server, &uri_thermal_raw);
         ESP_LOGI(TAG, "HTTP server started");
-        ESP_LOGI(TAG, "  Video:   MJPEG RTP on port 5600 (RFC 2435, %d fps, Q=%d)", MJPEG_FPS, MJPEG_QUALITY);
+#if ENABLE_MJPEG
+        ESP_LOGI(TAG, "  Video:   http://<ip>/mjpeg  (HTTP/TCP MJPEG, %dx%d, Q=%d, %dfps)",
+                 CAM_WIDTH, CAM_HEIGHT, MJPEG_QUALITY, MJPEG_FPS);
+#else
+        ESP_LOGI(TAG, "  Video:   H.264 RTP on port %d + http://<ip>/video", RTP_PORT);
         ESP_LOGI(TAG, "  SDP:     http://<ip>/stream.sdp (open in VLC)");
+#endif
         ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser, iron colormap)");
         ESP_LOGI(TAG, "  Status:  http://<ip>/status");
     } else {
