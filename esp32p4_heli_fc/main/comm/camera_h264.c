@@ -1415,18 +1415,18 @@ static esp_err_t stream_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req,
-        "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:40px'>"
+        "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:20px'>"
         "<h2>ESP32-P4 Helicopter</h2>"
 #if ENABLE_MJPEG
-        "<p style='color:#0f0;font-size:14px'>Primary: HTTP/TCP MJPEG (400x320)</p>"
-        "<p><a href='/mjpeg' style='color:#0af;font-size:20px'>Live Video (MJPEG)</a></p>"
+        "<div><img id='cam' style='max-width:100%;border:1px solid #444' /></div>"
+        "<p style='color:#0f0;font-size:12px'>MJPEG 400x320 (port 81)</p>"
+        "<script>document.getElementById('cam').src='http://'+location.hostname+':81/mjpeg';</script>"
 #else
-        "<p style='color:#888;font-size:14px'>Primary: H.264 RTP on port 5600</p>"
-        "<p><a href='/stream.sdp' style='color:#0af;font-size:16px'>stream.sdp</a> — open in VLC</p>"
-        "<p><a href='/video' style='color:#0af;font-size:20px'>H.264 Stream</a></p>"
+        "<p style='color:#888;font-size:14px'>H.264 RTP on port 5600</p>"
+        "<p><a href='/stream.sdp' style='color:#0af'>stream.sdp</a> — open in VLC</p>"
 #endif
-        "<p><a href='/thermal' style='color:#0af;font-size:20px'>Thermal Camera</a></p>"
-        "<p><a href='/status' style='color:#0af;font-size:20px'>System Status</a></p>"
+        "<p><a href='/thermal' style='color:#0af;font-size:18px'>Thermal Camera</a></p>"
+        "<p><a href='/status' style='color:#0af;font-size:14px'>Status</a></p>"
         "</body></html>", HTTPD_RESP_USE_STRLEN);
 }
 
@@ -1841,6 +1841,10 @@ static const httpd_uri_t uri_sdp = {
 
 httpd_handle_t camera_stream_server_start(void)
 {
+    /* Main HTTP server (port 80) — quick request/response handlers only.
+     * MJPEG stream runs on a SEPARATE server (port 81) because the
+     * streaming handler blocks in an infinite loop, which would prevent
+     * all other HTTP requests from being served. */
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 8;
     config.max_open_sockets = 4;
@@ -1852,22 +1856,35 @@ httpd_handle_t camera_stream_server_start(void)
         httpd_register_uri_handler(server, &uri_stream);
         httpd_register_uri_handler(server, &uri_status);
         httpd_register_uri_handler(server, &uri_video);
-        httpd_register_uri_handler(server, &uri_mjpeg);
         httpd_register_uri_handler(server, &uri_sdp);
         httpd_register_uri_handler(server, &uri_thermal);
         httpd_register_uri_handler(server, &uri_thermal_raw);
-        ESP_LOGI(TAG, "HTTP server started");
-#if ENABLE_MJPEG
-        ESP_LOGI(TAG, "  Video:   http://<ip>/mjpeg  (HTTP/TCP MJPEG, %dx%d, Q=%d, %dfps)",
-                 CAM_WIDTH, CAM_HEIGHT, MJPEG_QUALITY, MJPEG_FPS);
-#else
-        ESP_LOGI(TAG, "  Video:   H.264 RTP on port %d + http://<ip>/video", RTP_PORT);
-        ESP_LOGI(TAG, "  SDP:     http://<ip>/stream.sdp (open in VLC)");
-#endif
-        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser, iron colormap)");
+        ESP_LOGI(TAG, "HTTP server started (port 80)");
+        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal");
         ESP_LOGI(TAG, "  Status:  http://<ip>/status");
     } else {
-        ESP_LOGE(TAG, "Failed to start HTTP server");
+        ESP_LOGE(TAG, "Failed to start HTTP server (port 80)");
+    }
+
+    /* MJPEG streaming server (port 81) — separate httpd task so the
+     * infinite-loop streaming handler doesn't block other HTTP requests. */
+    httpd_config_t mjpeg_config = HTTPD_DEFAULT_CONFIG();
+    mjpeg_config.server_port = 81;
+    mjpeg_config.ctrl_port = 32769;     /* Different from default 32768 */
+    mjpeg_config.max_uri_handlers = 2;
+    mjpeg_config.max_open_sockets = 2;
+    mjpeg_config.stack_size = 8192;
+
+    httpd_handle_t mjpeg_server = NULL;
+    if (httpd_start(&mjpeg_server, &mjpeg_config) == ESP_OK) {
+        httpd_register_uri_handler(mjpeg_server, &uri_mjpeg);
+        ESP_LOGI(TAG, "MJPEG server started (port 81)");
+#if ENABLE_MJPEG
+        ESP_LOGI(TAG, "  Video:   http://<ip>:81/mjpeg  (HTTP/TCP MJPEG, %dx%d, Q=%d, %dfps)",
+                 CAM_WIDTH, CAM_HEIGHT, MJPEG_QUALITY, MJPEG_FPS);
+#endif
+    } else {
+        ESP_LOGE(TAG, "Failed to start MJPEG server (port 81)");
     }
 
     return server;
