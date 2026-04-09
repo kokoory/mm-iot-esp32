@@ -1403,7 +1403,7 @@ static esp_err_t stream_handler(httpd_req_t *req)
         "<h2>ESP32-P4 Helicopter</h2>"
         "<p style='color:#888;font-size:14px'>Primary: MJPEG RTP on port 5600 (RFC 2435)</p>"
         "<p><a href='/stream.sdp' style='color:#0af;font-size:16px'>stream.sdp</a> — open in VLC</p>"
-        "<p><a href='/thermal' style='color:#0af;font-size:20px'>USB Camera</a></p>"
+        "<p><a href='/thermal' style='color:#0af;font-size:20px'>Thermal Camera</a></p>"
         "<p><a href='/status' style='color:#0af;font-size:20px'>System Status</a></p>"
         "</body></html>", HTTPD_RESP_USE_STRLEN);
 }
@@ -1541,44 +1541,89 @@ static esp_err_t h264_stream_handler(httpd_req_t *req)
     return res;
 }
 
-/* ========== USB Camera HTML Viewer & JPEG Endpoint ========== */
+/* ========== Thermal Camera HTML Viewer & Raw Endpoint ========== */
 
 /*
- * Self-contained HTML page that fetches JPEG from /thermal/raw
- * and displays it as an auto-refreshing image. No external dependencies.
+ * Self-contained HTML page that fetches raw Y16 data from /thermal/raw
+ * and renders it on a canvas with iron colormap.  No external dependencies.
  */
 static const char THERMAL_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-"<title>USB Camera</title>"
+"<title>Thermal Camera</title>"
 "<style>"
 "body{background:#111;color:#eee;font-family:monospace;margin:0;display:flex;"
 "flex-direction:column;align-items:center;justify-content:center;height:100vh}"
-"img{max-width:90vw;max-height:85vh;border:1px solid #444}"
+"canvas{image-rendering:pixelated;border:1px solid #444}"
 "#info{margin-top:8px;font-size:14px}"
 "</style></head><body>"
-"<img id='cam'>"
+"<canvas id='c'></canvas>"
 "<div id='info'>Connecting...</div>"
 "<script>"
-"const img=document.getElementById('cam');"
+"const canvas=document.getElementById('c');"
+"const ctx=canvas.getContext('2d');"
 "const info=document.getElementById('info');"
-"let frames=0,lastT=performance.now(),pollMs=67,errCnt=0;"
+"let frames=0,lastT=performance.now(),pollMs=111,errCnt=0,tempStr='';"
+"const lut=new Uint8Array(256*3);"
+"for(let i=0;i<256;i++){"
+"  let r,g,b;"
+"  if(i<64){r=0;g=0;b=i*4;}"
+"  else if(i<128){let t=(i-64)*4;r=t;g=0;b=255-t;}"
+"  else if(i<192){let t=(i-128)*4;r=255;g=t;b=0;}"
+"  else{let t=(i-192)*4;r=255;g=255;b=t;}"
+"  lut[i*3]=r;lut[i*3+1]=g;lut[i*3+2]=b;"
+"}"
+"const SCALE=4;"
+"let imgData=null,w=0,h=0;"
 "async function poll(){"
 "  try{"
 "    const resp=await fetch('/thermal/raw');"
 "    if(resp.status===204||!resp.ok){"
-"      errCnt++;pollMs=resp.status===204?1000:Math.min(5000,67*Math.pow(2,errCnt));"
-"      info.textContent=resp.status===204?'Waiting for USB camera...':'Error '+resp.status;return;"
+"      errCnt++;pollMs=resp.status===204?1000:Math.min(5000,111*Math.pow(2,errCnt));"
+"      info.textContent=resp.status===204?'Waiting for thermal camera...':'Error '+resp.status;return;"
 "    }"
-"    errCnt=0;pollMs=67;"
-"    const blob=await resp.blob();"
-"    const url=URL.createObjectURL(blob);"
-"    img.onload=()=>URL.revokeObjectURL(url);"
-"    img.src=url;"
+"    errCnt=0;pollMs=111;"
+"    const tw=parseInt(resp.headers.get('X-Thermal-Width'))||160;"
+"    const th=parseInt(resp.headers.get('X-Thermal-Height'))||120;"
+"    if(tw!==w||th!==h){"
+"      w=tw;h=th;canvas.width=w;canvas.height=h;"
+"      canvas.style.width=(w*SCALE)+'px';canvas.style.height=(h*SCALE)+'px';"
+"      imgData=ctx.createImageData(w,h);"
+"    }"
+"    const buf=await resp.arrayBuffer();"
+"    const raw=new Uint8Array(buf);"
+"    const npix=w*h;"
+"    let y=new Uint8Array(npix);"
+"    if(raw.length===npix+4){"
+"      const vmin=raw[0]|(raw[1]<<8);"
+"      const vmax=raw[2]|(raw[3]<<8);"
+"      for(let i=0;i<npix;i++)y[i]=raw[4+i];"
+"      const cx=(w>>1),cy=(h>>1);"
+"      const spotN=raw[4+cy*w+cx];"
+"      const rng=vmax>vmin?vmax-vmin:1;"
+"      const spotRaw=vmin+spotN*rng/255;"
+"      const spotC=(spotRaw/100-273.15).toFixed(1);"
+"      const tminC=(vmin/100-273.15).toFixed(1);"
+"      const tmaxC=(vmax/100-273.15).toFixed(1);"
+"      tempStr=' | '+tminC+'~'+tmaxC+'C  center:'+spotC+'C';"
+"    }else if(raw.length>=npix){"
+"      for(let i=0;i<npix;i++)y[i]=raw[i];"
+"      tempStr='';"
+"    }"
+"    const d=imgData.data;"
+"    for(let i=0;i<npix;i++){"
+"      const idx=y[i];"
+"      d[i*4]=lut[idx*3];d[i*4+1]=lut[idx*3+1];d[i*4+2]=lut[idx*3+2];d[i*4+3]=255;"
+"    }"
+"    ctx.putImageData(imgData,0,0);"
+"    ctx.strokeStyle='rgba(255,255,255,0.7)';ctx.lineWidth=1;"
+"    const cx2=w/2,cy2=h/2;"
+"    ctx.beginPath();ctx.moveTo(cx2-4,cy2);ctx.lineTo(cx2+4,cy2);"
+"    ctx.moveTo(cx2,cy2-4);ctx.lineTo(cx2,cy2+4);ctx.stroke();"
 "    frames++;"
 "    const now=performance.now();"
 "    if(now-lastT>=1000){"
 "      const fps=(frames*1000/(now-lastT)).toFixed(1);"
-"      info.textContent=fps+' fps | MJPEG';"
+"      info.textContent=w+'x'+h+' Y16 | '+fps+' fps'+tempStr;"
 "      frames=0;lastT=now;"
 "    }"
 "  }catch(e){info.textContent='Error: '+e.message;}"
@@ -1601,28 +1646,58 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
         return httpd_resp_send(req, NULL, 0);
     }
 
-    /* USB camera returns MJPEG — serve as JPEG image directly */
-    size_t max_sz = thermal_camera_frame_size();
-    uint8_t *jpeg_buf = heap_caps_malloc(max_sz, MALLOC_CAP_SPIRAM);
-    if (!jpeg_buf) {
+    unsigned tw = thermal_camera_width();
+    unsigned th = thermal_camera_height();
+    size_t frame_sz = thermal_camera_frame_size();
+    unsigned npix = tw * th;
+
+    uint16_t *y16_buf = heap_caps_malloc(frame_sz, MALLOC_CAP_SPIRAM);
+    if (!y16_buf) {
         httpd_resp_set_status(req, "204 No Content");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         return httpd_resp_send(req, NULL, 0);
     }
 
-    size_t jpeg_len = 0;
-    if (!thermal_camera_get_jpeg(jpeg_buf, max_sz, &jpeg_len)) {
-        free(jpeg_buf);
+    if (!thermal_camera_get_frame(y16_buf)) {
+        free(y16_buf);
         httpd_resp_set_status(req, "204 No Content");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         return httpd_resp_send(req, NULL, 0);
     }
 
-    httpd_resp_set_type(req, "image/jpeg");
+    /* Compact format: 4-byte header (vmin_LE16, vmax_LE16) + npix bytes (8-bit normalized) */
+    uint16_t vmin = 65535, vmax = 0;
+    for (unsigned i = 0; i < npix; i++) {
+        if (y16_buf[i] < vmin) vmin = y16_buf[i];
+        if (y16_buf[i] > vmax) vmax = y16_buf[i];
+    }
+    uint16_t rng = (vmax > vmin) ? (vmax - vmin) : 1;
+
+    size_t out_sz = 4 + npix;
+    uint8_t *out = heap_caps_malloc(out_sz, MALLOC_CAP_SPIRAM);
+    if (!out) { free(y16_buf); return httpd_resp_send(req, NULL, 0); }
+
+    out[0] = vmin & 0xFF; out[1] = (vmin >> 8) & 0xFF;
+    out[2] = vmax & 0xFF; out[3] = (vmax >> 8) & 0xFF;
+
+    for (unsigned i = 0; i < npix; i++) {
+        out[4 + i] = (uint8_t)(((uint32_t)(y16_buf[i] - vmin) * 255) / rng);
+    }
+    free(y16_buf);
+
+    httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Expose-Headers",
+                       "X-Thermal-Width,X-Thermal-Height");
 
-    esp_err_t res = httpd_resp_send(req, (const char *)jpeg_buf, jpeg_len);
-    free(jpeg_buf);
+    char w_str[12], h_str[12];
+    snprintf(w_str, sizeof(w_str), "%u", tw);
+    snprintf(h_str, sizeof(h_str), "%u", th);
+    httpd_resp_set_hdr(req, "X-Thermal-Width", w_str);
+    httpd_resp_set_hdr(req, "X-Thermal-Height", h_str);
+
+    esp_err_t res = httpd_resp_send(req, (const char *)out, out_sz);
+    free(out);
     return res;
 }
 
@@ -1683,7 +1758,7 @@ httpd_handle_t camera_stream_server_start(void)
         ESP_LOGI(TAG, "HTTP server started");
         ESP_LOGI(TAG, "  Video:   MJPEG RTP on port 5600 (RFC 2435, %d fps, Q=%d)", MJPEG_FPS, MJPEG_QUALITY);
         ESP_LOGI(TAG, "  SDP:     http://<ip>/stream.sdp (open in VLC)");
-        ESP_LOGI(TAG, "  USB Cam: http://<ip>/thermal  (browser MJPEG)");
+        ESP_LOGI(TAG, "  Thermal: http://<ip>/thermal  (browser, iron colormap)");
         ESP_LOGI(TAG, "  Status:  http://<ip>/status");
     } else {
         ESP_LOGE(TAG, "Failed to start HTTP server");

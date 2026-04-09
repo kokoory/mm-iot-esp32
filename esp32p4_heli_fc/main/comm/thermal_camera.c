@@ -1,303 +1,418 @@
 /*
- * USB Camera — Logitech C920 (or compatible UVC webcam)
+ * Thermal Camera — FLIR Lepton 3.5 via SPI (VoSPI) + I2C (CCI)
  *
- * USB Host UVC driver receives MJPEG frames.
- * Frames are double-buffered in PSRAM for thread-safe access.
+ * SparkFun Lepton Breakout Board connected to ESP32-P4:
+ *   VoSPI: SPI3_HOST shared with IMU/MAG (20MHz, Mode 3)
+ *   CCI:   I2C0 shared with camera SCCB (address 0x2A)
+ *   CS:    PIN_LEPTON_CS (GPIO 31)
+ *   RST:   PIN_LEPTON_RST (GPIO 52)
  *
- * Previously: FLIR Lepton via PureThermal (Y16 160x120 @9fps)
- * Now: Logitech C920 (MJPEG 640x480 @15fps)
+ * Lepton 3.5: 160x120 @ ~9fps, Grey14 (2 bytes/pixel)
+ * VoSPI frame = 4 segments x 60 packets x 164 bytes = 39,360 bytes
+ *
+ * References:
+ *   - https://github.com/ducky64/arduino-lepton
+ *   - FLIR Lepton Engineering Datasheet
+ *   - VoSPI Implementation Specification
  */
 
 #include "thermal_camera.h"
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_heap_caps.h"
-#include "usb/usb_host.h"
-#include "usb/uvc_host.h"
+#include "driver/spi_master.h"
+#include "driver/i2c_master.h"
+#include "driver/gpio.h"
 
-static const char *TAG = "usb_cam";
+#include "../common/board_config.h"
+#include "../common/i2c_sync.h"
 
-/* USB camera configuration — Logitech C920 */
-#define USB_CAM_VID         0x046D  /* Logitech */
-#define USB_CAM_PID         0x082D  /* C920 HD Pro Webcam */
-#define USB_CAM_WIDTH       640
-#define USB_CAM_HEIGHT      480
-#define USB_CAM_FPS         15
-#define USB_CAM_MAX_FRAME   (100 * 1024)  /* 100KB max MJPEG frame */
+static const char *TAG = "lepton";
 
-/* Negotiated resolution (set after stream open) */
-static unsigned s_width = 0;
-static unsigned s_height = 0;
-static size_t s_frame_size = 0;
+/* ── Lepton VoSPI constants ──────────────────────────────────────── */
+#define LEP_WIDTH           160
+#define LEP_HEIGHT          120
+#define LEP_BPP             2       /* Grey14: 2 bytes/pixel */
+#define LEP_PKT_HEADER      4       /* 2 bytes ID + 2 bytes CRC */
+#define LEP_PKT_DATA       160      /* 80 pixels × 2 bytes (Grey14) */
+#define LEP_PKT_SIZE        (LEP_PKT_HEADER + LEP_PKT_DATA)  /* 164 */
+#define LEP_PKTS_PER_SEG    60
+#define LEP_SEGS_PER_FRAME   4
+#define LEP_FRAME_PKTS      (LEP_PKTS_PER_SEG * LEP_SEGS_PER_FRAME)  /* 240 */
+#define LEP_FRAME_SIZE      (LEP_WIDTH * LEP_HEIGHT * LEP_BPP)  /* 38400 */
 
-/* Double buffer in PSRAM (MJPEG frames are variable size) */
-static uint8_t *s_frame_buf = NULL;
-static size_t s_frame_len = 0;         /* Actual MJPEG frame length */
-static SemaphoreHandle_t s_frame_mutex = NULL;
-static bool s_frame_valid = false;
-static bool s_active = false;
+#define LEP_RESYNC_MS       185     /* CS HIGH duration for resync */
+#define LEP_BOOT_WAIT_MS    950     /* Wait after reset before I2C */
 
-/* User callback */
-static thermal_frame_cb_t s_user_cb = NULL;
-static void *s_user_ctx = NULL;
+/* Lepton I2C (CCI) registers */
+#define LEP_REG_STATUS      0x0002
+#define LEP_REG_COMMAND_ID  0x0004
+#define LEP_REG_DATA_LEN    0x0006
+#define LEP_REG_DATA0       0x0008
 
-/* UVC handles */
-static uvc_host_stream_hdl_t s_stream = NULL;
+/* ── Module state ────────────────────────────────────────────────── */
+static struct {
+    bool initialized;
+    bool active;
 
+    spi_device_handle_t spi_dev;
 
-/* ------------------------------------------------------------------ */
-/* USB Host library event handler task                                 */
-/* ------------------------------------------------------------------ */
+    /* Double buffer in PSRAM */
+    uint16_t *frame_buf;        /* Latest complete frame (Y16) */
+    SemaphoreHandle_t frame_mutex;
+    bool frame_valid;
 
-static void usb_host_lib_task(void *param)
+    /* VoSPI read buffer (full frame assembly) */
+    uint8_t *vospi_buf;
+
+    /* Stats */
+    uint32_t frame_count;
+    uint32_t discard_count;
+    uint32_t resync_count;
+
+    /* Task handle */
+    TaskHandle_t task_handle;
+} s_lep = {0};
+
+/* ── I2C CCI helpers ─────────────────────────────────────────────── */
+
+static esp_err_t lep_i2c_write_reg16(uint16_t reg, uint16_t val)
 {
+    i2c_master_bus_handle_t bus = NULL;
+    esp_err_t err = i2c_master_get_bus_handle(I2C_PORT, &bus);
+    if (err != ESP_OK || bus == NULL) return ESP_FAIL;
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = LEPTON_I2C_ADDR,
+        .scl_speed_hz = I2C_FREQ_HZ,
+    };
+    i2c_master_dev_handle_t dev = NULL;
+    err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
+    if (err != ESP_OK) return err;
+
+    uint8_t buf[4] = {
+        (reg >> 8) & 0xFF, reg & 0xFF,
+        (val >> 8) & 0xFF, val & 0xFF,
+    };
+    err = i2c_master_transmit(dev, buf, 4, 100);
+    i2c_master_bus_rm_device(dev);
+    return err;
+}
+
+static esp_err_t lep_i2c_read_reg16(uint16_t reg, uint16_t *val)
+{
+    i2c_master_bus_handle_t bus = NULL;
+    esp_err_t err = i2c_master_get_bus_handle(I2C_PORT, &bus);
+    if (err != ESP_OK || bus == NULL) return ESP_FAIL;
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = LEPTON_I2C_ADDR,
+        .scl_speed_hz = I2C_FREQ_HZ,
+    };
+    i2c_master_dev_handle_t dev = NULL;
+    err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
+    if (err != ESP_OK) return err;
+
+    uint8_t reg_buf[2] = { (reg >> 8) & 0xFF, reg & 0xFF };
+    uint8_t data_buf[2] = {0};
+    err = i2c_master_transmit_receive(dev, reg_buf, 2, data_buf, 2, 100);
+    if (err == ESP_OK) {
+        *val = ((uint16_t)data_buf[0] << 8) | data_buf[1];
+    }
+    i2c_master_bus_rm_device(dev);
+    return err;
+}
+
+static bool lep_wait_busy(void)
+{
+    for (int i = 0; i < 50; i++) {
+        uint16_t status = 0;
+        if (lep_i2c_read_reg16(LEP_REG_STATUS, &status) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (!(status & 0x0001)) {  /* Not busy */
+            return (status >> 8) == 0;  /* No error */
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ESP_LOGW(TAG, "CCI busy timeout");
+    return false;
+}
+
+static bool lep_cci_command(uint16_t command_id)
+{
+    if (lep_i2c_write_reg16(LEP_REG_COMMAND_ID, command_id) != ESP_OK) return false;
+    return lep_wait_busy();
+}
+
+static bool lep_check_boot(void)
+{
+    uint16_t status = 0;
+    if (lep_i2c_read_reg16(LEP_REG_STATUS, &status) != ESP_OK) return false;
+
+    /* Bit 2: boot status, Bit 1: boot mode, Bit 0: busy */
+    if ((status & 0x0004) && !(status & 0x0001)) {
+        ESP_LOGI(TAG, "Lepton booted (status=0x%04X)", status);
+        return true;
+    }
+    return false;
+}
+
+/* ── VoSPI frame reader task ─────────────────────────────────────── */
+
+static void lepton_vospi_task(void *arg)
+{
+    /* Working buffer for one VoSPI packet */
+    uint8_t pkt[LEP_PKT_SIZE];
+    spi_transaction_t trans = {
+        .length = LEP_PKT_SIZE * 8,
+        .rx_buffer = pkt,
+        .tx_buffer = NULL,
+    };
+
+    bool synced = false;
+    int64_t last_log_us = 0;
+
+    ESP_LOGI(TAG, "VoSPI task started — reading 160x120 Grey14 @~9fps");
+
     while (1) {
-        uint32_t event_flags;
-        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            /* All clients deregistered */
+        /* Assemble one frame: 4 segments × 60 packets */
+        bool frame_ok = true;
+
+        for (int seg = 1; seg <= LEP_SEGS_PER_FRAME && frame_ok; seg++) {
+            bool discard_seg = false;
+
+            for (int pkt_num = 0; pkt_num < LEP_PKTS_PER_SEG && frame_ok; ) {
+                esp_err_t err = spi_device_transmit(s_lep.spi_dev, &trans);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "SPI read failed: %s", esp_err_to_name(err));
+                    frame_ok = false;
+                    break;
+                }
+
+                uint16_t id = ((uint16_t)pkt[0] << 8) | pkt[1];
+
+                /* Discard packet: (id >> 8) & 0x0f == 0x0f */
+                if (((id >> 8) & 0x0F) == 0x0F) {
+                    s_lep.discard_count++;
+                    if (pkt_num == 0 && seg == 1) {
+                        /* No frame in progress — wait and retry */
+                        frame_ok = false;
+                    }
+                    /* Mid-frame discard: retry same packet number */
+                    continue;
+                }
+
+                uint16_t packet_num = id & 0x0FFF;
+                uint8_t ttt = (id >> 12) & 0x07;
+
+                /* Validate packet number */
+                if (packet_num != pkt_num) {
+                    ESP_LOGD(TAG, "Packet mismatch: got %d expect %d (seg %d)", packet_num, pkt_num, seg);
+                    frame_ok = false;
+                    synced = false;
+                    break;
+                }
+
+                /* Segment validation on packet 20 */
+                if (pkt_num == 20) {
+                    if (ttt == 0) {
+                        /* Segment number 0 = discard this segment */
+                        discard_seg = true;
+                    } else if (ttt != seg) {
+                        ESP_LOGD(TAG, "Segment mismatch: ttt=%d expect=%d", ttt, seg);
+                        frame_ok = false;
+                        synced = false;
+                        break;
+                    }
+                }
+
+                /* Copy pixel data (skip 4-byte header) to assembly buffer */
+                size_t offset = ((seg - 1) * LEP_PKTS_PER_SEG + pkt_num) * LEP_PKT_DATA;
+                memcpy(s_lep.vospi_buf + offset, pkt + LEP_PKT_HEADER, LEP_PKT_DATA);
+
+                pkt_num++;
+            }
+
+            if (discard_seg) {
+                seg--;  /* Retry this segment */
+            }
         }
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-            /* All devices freed */
+
+        if (!frame_ok) {
+            if (!synced) {
+                /* Resync: hold CS HIGH for ≥185ms */
+                s_lep.resync_count++;
+                ESP_LOGD(TAG, "VoSPI resync #%lu", (unsigned long)s_lep.resync_count);
+                vTaskDelay(pdMS_TO_TICKS(LEP_RESYNC_MS));
+                synced = true;  /* Will attempt sync on next iteration */
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+            continue;
+        }
+
+        /* Frame complete — copy to double buffer */
+        synced = true;
+        s_lep.frame_count++;
+
+        if (xSemaphoreTake(s_lep.frame_mutex, 0) == pdTRUE) {
+            memcpy(s_lep.frame_buf, s_lep.vospi_buf, LEP_FRAME_SIZE);
+            s_lep.frame_valid = true;
+            xSemaphoreGive(s_lep.frame_mutex);
+        }
+
+        /* Periodic stats */
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - last_log_us > 10000000) {  /* Every 10s */
+            ESP_LOGI(TAG, "Lepton: %lu frames, %lu discards, %lu resyncs",
+                     (unsigned long)s_lep.frame_count,
+                     (unsigned long)s_lep.discard_count,
+                     (unsigned long)s_lep.resync_count);
+            last_log_us = now_us;
         }
     }
 }
 
-
-/* ------------------------------------------------------------------ */
-/* UVC frame callback                                                  */
-/* ------------------------------------------------------------------ */
-
-static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
-{
-    static uint32_t s_frame_count = 0;
-
-    if (!frame || !frame->data || frame->data_len == 0) return true;
-
-    s_frame_count++;
-    if (s_frame_count == 1) {
-        const uint8_t *p = (const uint8_t *)frame->data;
-        ESP_LOGI(TAG, "First frame: len=%u  bytes[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x",
-                 (unsigned)frame->data_len,
-                 p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
-        /* MJPEG should start with FF D8 (SOI marker) */
-        if (p[0] == 0xFF && p[1] == 0xD8) {
-            ESP_LOGI(TAG, "MJPEG format confirmed (SOI marker)");
-        } else {
-            ESP_LOGW(TAG, "Unexpected format — not MJPEG?");
-        }
-    }
-    if ((s_frame_count % 150) == 0) {
-        ESP_LOGI(TAG, "USB cam frame #%lu  len=%u",
-                 (unsigned long)s_frame_count, (unsigned)frame->data_len);
-    }
-
-    /* Copy to double buffer under mutex */
-    if (xSemaphoreTake(s_frame_mutex, 0) == pdTRUE) {
-        size_t copy_len = (frame->data_len < USB_CAM_MAX_FRAME) ? frame->data_len : USB_CAM_MAX_FRAME;
-        memcpy(s_frame_buf, frame->data, copy_len);
-        s_frame_len = copy_len;
-        s_frame_valid = true;
-        xSemaphoreGive(s_frame_mutex);
-    }
-
-    return true;
-}
-
-/* ------------------------------------------------------------------ */
-/* UVC stream event callback                                           */
-/* ------------------------------------------------------------------ */
-
-static void uvc_stream_callback(const uvc_host_stream_event_data_t *event, void *user_ctx)
-{
-    switch (event->type) {
-    case UVC_HOST_TRANSFER_ERROR:
-        ESP_LOGW(TAG, "UVC transfer error");
-        break;
-    case UVC_HOST_DEVICE_DISCONNECTED:
-        ESP_LOGW(TAG, "USB camera disconnected");
-        s_active = false;
-        break;
-    case UVC_HOST_FRAME_BUFFER_OVERFLOW:
-        ESP_LOGW(TAG, "Frame buffer overflow");
-        break;
-    default:
-        break;
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* Public API                                                          */
-/* ------------------------------------------------------------------ */
+/* ── Public API ──────────────────────────────────────────────────── */
 
 esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
 {
-    s_user_cb = frame_cb;
-    s_user_ctx = user_ctx;
+    if (s_lep.initialized) return ESP_OK;
 
-    s_frame_mutex = xSemaphoreCreateMutex();
-    if (!s_frame_mutex) {
-        ESP_LOGE(TAG, "Failed to create mutex");
-        return ESP_ERR_NO_MEM;
-    }
+    ESP_LOGI(TAG, "Initializing FLIR Lepton 3.5 (SPI VoSPI + I2C CCI)");
+    ESP_LOGI(TAG, "  CS=GPIO%d, RST=GPIO%d, SPI=%d, I2C=0x%02X",
+             PIN_LEPTON_CS, PIN_LEPTON_RST, LEPTON_SPI_HOST, LEPTON_I2C_ADDR);
 
-    /* Install USB Host Library */
-    usb_host_config_t host_config = {
-        .intr_flags = ESP_INTR_FLAG_LEVEL1,
+    /* RST pin — active low */
+    gpio_config_t rst_conf = {
+        .pin_bit_mask = (1ULL << PIN_LEPTON_RST),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
     };
-    esp_err_t ret = usb_host_install(&host_config);
+    gpio_config(&rst_conf);
+
+    /* Hardware reset */
+    gpio_set_level(PIN_LEPTON_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(PIN_LEPTON_RST, 1);
+    ESP_LOGI(TAG, "Lepton reset released, waiting %dms for boot...", LEP_BOOT_WAIT_MS);
+    vTaskDelay(pdMS_TO_TICKS(LEP_BOOT_WAIT_MS));
+
+    /* Wait for sensor I2C bus to be ready */
+    i2c_sync_wait_sensors();
+
+    /* Add Lepton as SPI device on shared bus (SPI3_HOST)
+     * SPI Mode 3: CPOL=1, CPHA=1 — per VoSPI spec */
+    spi_device_interface_config_t spi_cfg = {
+        .clock_speed_hz = LEPTON_SPI_FREQ,
+        .mode = 3,  /* CPOL=1, CPHA=1 */
+        .spics_io_num = PIN_LEPTON_CS,
+        .queue_size = 1,
+        .flags = SPI_DEVICE_HALFDUPLEX,  /* Lepton only sends data */
+    };
+    esp_err_t ret = spi_bus_add_device(LEPTON_SPI_HOST, &spi_cfg, &s_lep.spi_dev);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "USB host install failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "SPI device add failed: %s", esp_err_to_name(ret));
         return ret;
     }
+    ESP_LOGI(TAG, "SPI device added on SPI3_HOST (20MHz, Mode 3)");
 
-    /* Start USB Host event handling task */
-    xTaskCreatePinnedToCore(usb_host_lib_task, "usb_host", 4096, NULL, 2, NULL, 1);
-
-    /* Install UVC driver */
-    uvc_host_driver_config_t uvc_config = {
-        .driver_task_stack_size = 4096,
-        .driver_task_priority = 5,
-        .xCoreID = 1,
-        .create_background_task = true,
-    };
-    ret = uvc_host_install(&uvc_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "UVC host install failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    /* Open UVC stream — Logitech C920 (or any UVC webcam)
-     * Request MJPEG format for compressed video.
-     * If VID/PID match fails, retry with VID/PID=0 to accept any UVC device. */
-    uvc_host_stream_config_t stream_config = {
-        .event_cb = uvc_stream_callback,
-        .frame_cb = uvc_frame_callback,
-        .user_ctx = NULL,
-        .usb = {
-            .vid = USB_CAM_VID,
-            .pid = USB_CAM_PID,
-        },
-        .vs_format = {
-            .h_res = USB_CAM_WIDTH,
-            .v_res = USB_CAM_HEIGHT,
-            .fps = USB_CAM_FPS,
-            .format = UVC_VS_FORMAT_MJPEG,
-        },
-        .advanced = {
-            .number_of_frame_buffers = 3,
-            .frame_size = USB_CAM_MAX_FRAME,
-            .frame_heap_caps = MALLOC_CAP_SPIRAM,
-            .number_of_urbs = 5,
-            .urb_size = 20 * 1024,  /* Larger URBs for MJPEG data */
-        },
-    };
-
-    ESP_LOGI(TAG, "Waiting for USB camera (VID=0x%04X PID=0x%04X MJPEG %dx%d@%dfps)...",
-             USB_CAM_VID, USB_CAM_PID, USB_CAM_WIDTH, USB_CAM_HEIGHT, USB_CAM_FPS);
-    ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
-    if (ret != ESP_OK) {
-        /* Exact VID/PID failed — retry accepting any UVC device */
-        ESP_LOGW(TAG, "C920 open failed (%s), retrying with any UVC device...",
-                 esp_err_to_name(ret));
-        stream_config.usb.vid = 0;
-        stream_config.usb.pid = 0;
-        ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(10000), &s_stream);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "UVC stream open failed: %s (is USB camera connected?)",
-                     esp_err_to_name(ret));
-            return ret;
+    /* Check Lepton boot status via I2C CCI */
+    bool booted = false;
+    for (int i = 0; i < 10; i++) {
+        if (lep_check_boot()) {
+            booted = true;
+            break;
         }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    if (!booted) {
+        ESP_LOGW(TAG, "Lepton did not report boot — continuing anyway (may resync)");
     }
 
-    s_width = stream_config.vs_format.h_res;
-    s_height = stream_config.vs_format.v_res;
-    s_frame_size = USB_CAM_MAX_FRAME;  /* MJPEG: variable size, allocate max */
-    ESP_LOGI(TAG, "Opened: %ux%u MJPEG @%dfps (max frame=%uKB)",
-             s_width, s_height, stream_config.vs_format.fps,
-             (unsigned)(s_frame_size / 1024));
-
-    /* Allocate frame buffer in PSRAM */
-    s_frame_buf = heap_caps_calloc(1, s_frame_size, MALLOC_CAP_SPIRAM);
-    if (!s_frame_buf) {
-        ESP_LOGE(TAG, "Failed to allocate frame buffer (%u bytes)", (unsigned)s_frame_size);
+    /* Allocate buffers */
+    s_lep.frame_mutex = xSemaphoreCreateMutex();
+    s_lep.frame_buf = heap_caps_calloc(1, LEP_FRAME_SIZE, MALLOC_CAP_SPIRAM);
+    s_lep.vospi_buf = heap_caps_calloc(1, LEP_FRAME_SIZE, MALLOC_CAP_SPIRAM);
+    if (!s_lep.frame_buf || !s_lep.vospi_buf || !s_lep.frame_mutex) {
+        ESP_LOGE(TAG, "Failed to allocate frame buffers");
         return ESP_ERR_NO_MEM;
     }
+    ESP_LOGI(TAG, "Frame buffers: 2 x %dKB (PSRAM)", LEP_FRAME_SIZE / 1024);
 
-    s_active = true;
-    ESP_LOGI(TAG, "USB camera connected (%ux%u MJPEG)", s_width, s_height);
+    /* Start VoSPI reader task — high priority to maintain sync */
+    xTaskCreatePinnedToCore(lepton_vospi_task, "lepton", 4096, NULL, 6, &s_lep.task_handle, 1);
+
+    s_lep.initialized = true;
+    s_lep.active = true;
+    ESP_LOGI(TAG, "Lepton 3.5 initialized (160x120 Grey14, ~9fps)");
     return ESP_OK;
 }
 
 esp_err_t thermal_camera_start(void)
 {
-    if (!s_stream) return ESP_ERR_INVALID_STATE;
-
-    esp_err_t ret = uvc_host_stream_start(s_stream);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Thermal streaming started");
-    }
-    return ret;
+    if (!s_lep.initialized) return ESP_ERR_INVALID_STATE;
+    s_lep.active = true;
+    ESP_LOGI(TAG, "Thermal streaming started");
+    return ESP_OK;
 }
 
 esp_err_t thermal_camera_stop(void)
 {
-    if (!s_stream) return ESP_ERR_INVALID_STATE;
-    s_active = false;
-    return uvc_host_stream_stop(s_stream);
+    if (!s_lep.initialized) return ESP_ERR_INVALID_STATE;
+    s_lep.active = false;
+    return ESP_OK;
 }
 
 bool thermal_camera_get_frame(uint16_t *buf)
 {
-    if (!s_frame_valid || !s_frame_mutex) return false;
+    if (!s_lep.frame_valid || !s_lep.frame_mutex) return false;
 
-    if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (s_frame_valid) {
-            memcpy(buf, s_frame_buf, s_frame_len);
-            xSemaphoreGive(s_frame_mutex);
+    if (xSemaphoreTake(s_lep.frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (s_lep.frame_valid) {
+            memcpy(buf, s_lep.frame_buf, LEP_FRAME_SIZE);
+            xSemaphoreGive(s_lep.frame_mutex);
             return true;
         }
-        xSemaphoreGive(s_frame_mutex);
+        xSemaphoreGive(s_lep.frame_mutex);
     }
     return false;
 }
 
 bool thermal_camera_get_jpeg(uint8_t *buf, size_t buf_size, size_t *out_len)
 {
-    if (!s_frame_valid || !s_frame_mutex) return false;
-
-    if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (s_frame_valid && s_frame_len <= buf_size) {
-            memcpy(buf, s_frame_buf, s_frame_len);
-            *out_len = s_frame_len;
-            xSemaphoreGive(s_frame_mutex);
-            return true;
-        }
-        xSemaphoreGive(s_frame_mutex);
-    }
+    /* Lepton outputs raw Y16, not JPEG — this API not applicable */
+    (void)buf; (void)buf_size; (void)out_len;
     return false;
 }
 
 bool thermal_camera_is_active(void)
 {
-    return s_active;
+    return s_lep.active;
 }
 
 unsigned thermal_camera_width(void)
 {
-    return s_width;
+    return LEP_WIDTH;
 }
 
 unsigned thermal_camera_height(void)
 {
-    return s_height;
+    return LEP_HEIGHT;
 }
 
 size_t thermal_camera_frame_size(void)
 {
-    return s_frame_size;
+    return LEP_FRAME_SIZE;
 }

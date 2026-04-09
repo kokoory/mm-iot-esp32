@@ -55,6 +55,7 @@ static void init_nvs(void)
     ESP_ERROR_CHECK(ret);
 }
 
+#ifdef PIN_STATUS_LED
 static void init_status_led(void)
 {
     gpio_config_t io_conf = {
@@ -67,6 +68,9 @@ static void init_status_led(void)
     gpio_config(&io_conf);
     gpio_set_level(PIN_STATUS_LED, 0);
 }
+#else
+static void init_status_led(void) { }
+#endif
 
 void app_main(void)
 {

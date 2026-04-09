@@ -64,12 +64,12 @@ static const char *TAG = "sysmon_agent";
 #define LED_FAST_BLINK_MS       100     /* 5 Hz blink */
 
 /* ------------------------------------------------------------------ */
+#ifdef PIN_BATT_ADC
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_channel_t s_batt_adc_channel = ADC_CHANNEL_0;
 
 static int init_adc(void)
 {
-    /* Discover ADC unit and channel for the battery GPIO at runtime */
     adc_unit_t adc_unit;
     esp_err_t err = adc_oneshot_io_to_channel(PIN_BATT_ADC, &adc_unit, &s_batt_adc_channel);
     if (err != ESP_OK) {
@@ -109,11 +109,15 @@ static float read_battery_voltage(void)
     if (err != ESP_OK) {
         return 0.0f;
     }
-    /* Convert ADC raw to voltage, then apply divider ratio */
     float adc_voltage = ((float)raw / BATT_ADC_BITS) * BATT_ADC_VREF;
     return adc_voltage * param_get(PARAM_BATT_VDIV_RATIO);
 }
+#else
+static int init_adc(void) { ESP_LOGW(TAG, "Battery ADC disabled (pin reassigned)"); return 0; }
+static float read_battery_voltage(void) { return 0.0f; }
+#endif
 
+#ifdef PIN_STATUS_LED
 static void init_led(void)
 {
     gpio_config_t io_conf = {
@@ -131,6 +135,10 @@ static void set_led(bool on)
 {
     gpio_set_level(PIN_STATUS_LED, on ? 1 : 0);
 }
+#else
+static void init_led(void) { ESP_LOGW(TAG, "Status LED disabled (pin reassigned)"); }
+static void set_led(bool on) { (void)on; }
+#endif
 
 /* ── Param helpers ────────────────────────────────────────────── */
 
