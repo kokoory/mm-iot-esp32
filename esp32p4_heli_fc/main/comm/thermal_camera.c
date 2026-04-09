@@ -193,7 +193,7 @@ static void lepton_vospi_task(void *arg)
         /* CRITICAL: Acquire SPI bus for the entire frame.
          * VoSPI requires uninterrupted CS-low during all 240 packets.
          * Without this, IMU/MAG transactions interrupt CS → sync loss. */
-        esp_err_t acq = spi_device_acquire_bus(s_lep.spi_dev, pdMS_TO_TICKS(200));
+        esp_err_t acq = spi_device_acquire_bus(s_lep.spi_dev, portMAX_DELAY);
         if (acq != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
