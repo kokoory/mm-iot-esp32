@@ -1,12 +1,12 @@
 /*
- * ISM330DHC/ISM330DHCX 6-axis IMU driver (SPI)
+ * ISM330DHC/ISM330DHCX 6-axis IMU driver (I2C)
  * Accelerometer + Gyroscope
  */
 #pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "driver/spi_master.h"
+#include "driver/i2c_master.h"
 
 /* WHO_AM_I expected value */
 #define ISM330DHC_WHO_AM_I_VAL  0x6B
@@ -44,20 +44,20 @@
 
 /* Configuration handle */
 typedef struct {
-    spi_device_handle_t spi_dev;
+    i2c_master_dev_handle_t i2c_dev;
 } ism330dhc_t;
 
 /**
- * Initialise the ISM330DHC on an existing SPI bus.
+ * Initialise the ISM330DHC on an existing I2C bus.
  * Probes WHO_AM_I to verify communication.
  * Returns 0 on success, -1 on failure.
  */
-int ism330dhc_init(ism330dhc_t *dev, spi_host_device_t host, int cs_pin);
+int ism330dhc_init(ism330dhc_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_addr);
 
 /**
  * Configure sensor for flight controller use:
- *   Accel: ±16 g, 1.66 kHz ODR
- *   Gyro:  ±2000 dps, 1.66 kHz ODR
+ *   Accel: +/-16 g, 1.66 kHz ODR
+ *   Gyro:  +/-2000 dps, 1.66 kHz ODR
  *   BDU enabled, IF_INC enabled
  * Returns 0 on success.
  */

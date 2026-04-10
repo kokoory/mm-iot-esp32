@@ -1,14 +1,15 @@
 #pragma once
 
 /*
- * Synchronization between sensor_agent (Core 0) and comm tasks (Core 1).
+ * Synchronization between sensor_agent (Core 0) and thermal camera (Core 1).
  *
- * Sensor SPI init must complete before thermal camera adds its SPI device
- * to the shared SPI3_HOST bus. Also ensures I2C bus is ready before Lepton
- * CCI operations.
+ * sensor_agent creates the shared I2C bus and initializes IMU/MAG.
+ * thermal_camera waits for I2C bus to be ready before using it for Lepton CCI.
+ * thermal_camera also creates its own dedicated SPI bus for Lepton VoSPI.
  *
- * Order: sensor_agent inits SPI sensors first, signals completion, then
- * thermal camera adds Lepton SPI device and creates I2C bus for CCI.
+ * Order:
+ *   1. sensor_agent creates I2C bus + inits IMU/MAG → signals done
+ *   2. thermal_camera waits for signal → creates SPI bus + uses I2C for CCI
  */
 
 #include "freertos/FreeRTOS.h"
@@ -25,7 +26,7 @@ static inline void i2c_sync_init(void)
     }
 }
 
-/* Called by sensor_agent after all I2C sensor init is complete */
+/* Called by sensor_agent after I2C bus creation + sensor init is complete */
 static inline void i2c_sync_sensors_done(void)
 {
     if (g_i2c_sync_event) {
@@ -33,8 +34,8 @@ static inline void i2c_sync_sensors_done(void)
     }
 }
 
-/* Called by thermal camera before adding SPI device / starting I2C CCI.
- * Waits up to 10 seconds for sensor SPI init to complete. */
+/* Called by thermal_camera before using I2C bus for Lepton CCI.
+ * Waits up to 10 seconds for sensor_agent to create the I2C bus. */
 static inline void i2c_sync_wait_sensors(void)
 {
     if (g_i2c_sync_event) {

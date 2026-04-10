@@ -1,11 +1,11 @@
 /*
- * LIS3MDL 3-axis Magnetometer driver (SPI)
+ * LIS3MDL 3-axis Magnetometer driver (I2C)
  */
 #pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "driver/spi_master.h"
+#include "driver/i2c_master.h"
 
 /* WHO_AM_I expected value */
 #define LIS3MDL_WHO_AM_I_VAL    0x3D
@@ -36,19 +36,19 @@
 
 /* Device handle */
 typedef struct {
-    spi_device_handle_t spi_dev;
+    i2c_master_dev_handle_t i2c_dev;
 } lis3mdl_t;
 
 /**
- * Initialise LIS3MDL on the given SPI bus.
+ * Initialise LIS3MDL on the given I2C bus.
  * Probes WHO_AM_I register.
  * Returns 0 on success.
  */
-int lis3mdl_init(lis3mdl_t *dev, spi_host_device_t host, int cs_pin);
+int lis3mdl_init(lis3mdl_t *dev, i2c_master_bus_handle_t bus, uint8_t i2c_addr);
 
 /**
  * Configure for flight controller use:
- *   Ultra-high performance, 80 Hz ODR, ±8 Gauss, continuous mode, BDU
+ *   Ultra-high performance, 80 Hz ODR, +/-8 Gauss, continuous mode, BDU
  * Returns 0 on success.
  */
 int lis3mdl_configure(lis3mdl_t *dev);

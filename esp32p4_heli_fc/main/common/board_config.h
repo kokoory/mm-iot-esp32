@@ -1,5 +1,6 @@
 #pragma once
 
+#include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "driver/uart.h"
 #include "esp_adc/adc_oneshot.h"
@@ -11,24 +12,40 @@
  * Available GPIOs: 2,3,4,5,7,8,20,21,22,23,24,25,26,27,28,29,30,31,32,33,
  *                  46,47,48,49,50,51,52
  *
- * HaLow (MMECH06): GPIO 2,3,4,5,20,21,23,32 (SPI2_HOST)
- * Sensor SPI:      GPIO 22=SCLK, 52=MOSI, 30=MISO (SPI3_HOST)
- * I2C (camera):    GPIO 7=SDA, 8=SCL
+ * HaLow (MMECH06):   GPIO 2,3,4,5,20,21,23,32 (SPI2_HOST)
+ * Lepton VoSPI:      GPIO 22=SCLK, 30=MISO, 31=CS (SPI3_HOST, dedicated)
+ * Sensor + Lepton I2C: GPIO 7=SDA, 8=SCL (I2C0, shared)
  */
 
-/* ── Sensor SPI Bus (ISM330DHCX + LIS3MDL + Lepton) ─────────────── */
-#define PIN_SENSOR_SPI_SCLK     22
-#define PIN_SENSOR_SPI_MOSI     52
-#define PIN_SENSOR_SPI_MISO     30
-#define PIN_SENSOR_CS_IMU       28
-#define PIN_SENSOR_CS_MAG       29
-#define SENSOR_SPI_HOST         SPI3_HOST
-
-/* ── I2C0 (Thermal Camera CCI) ──────────────────────────────────── */
+/* ── I2C Bus (ISM330DHCX + LIS3MDL + Lepton CCI) ──────────────────── */
 #define PIN_I2C_SDA         7
 #define PIN_I2C_SCL         8
 #define I2C_PORT            I2C_NUM_0
-#define I2C_FREQ_HZ         100000
+#define I2C_SENSOR_FREQ_HZ  400000    /* 400kHz — IMU/MAG fast mode */
+#define I2C_LEPTON_FREQ_HZ  100000    /* 100kHz — Lepton CCI */
+
+/* IMU: ISM330DHCX (SA0=GND → 0x6A, SA0=VDD → 0x6B) */
+#define IMU_I2C_ADDR        0x6A
+
+/* Magnetometer: LIS3MDL (SDO/SA1=GND → 0x1C, SDO/SA1=VDD → 0x1E) */
+#define MAG_I2C_ADDR        0x1C
+
+/* ── Thermal Camera: FLIR Lepton 3.5 (PureThermal Breakout Board) ─── */
+/* VoSPI: SPI3_HOST (dedicated — no other devices on this bus)
+ * CCI:   I2C0 shared with IMU/MAG (addr 0x2A, no conflict)
+ * EN:    Active HIGH — controls Lepton power on PureThermal Breakout
+ *
+ * PureThermal Breakout Board pinout:
+ *   1=SCL  2=SDA  3=VIN  4=GND  5=CLK
+ *   6=MISO 7=MOSI(NC) 8=CS 9=VSYNC 10=EN
+ */
+#define LEPTON_SPI_HOST     SPI3_HOST
+#define PIN_LEPTON_SPI_SCLK 22
+#define PIN_LEPTON_SPI_MISO 30
+#define PIN_LEPTON_CS       31
+#define PIN_LEPTON_EN       28        /* PureThermal EN (active HIGH) */
+#define LEPTON_SPI_FREQ     20000000  /* 20 MHz max per Lepton datasheet */
+#define LEPTON_I2C_ADDR     0x2A      /* 7-bit CCI address */
 
 /* ── GPS (NMEA UART) ─────────────────────────────────────────────── */
 #define PIN_GPS_TX          33
@@ -53,17 +70,9 @@
 // #define BATT_ADC_ATTEN      ADC_ATTEN_DB_12
 // #define BATT_VOLTAGE_DIVIDER_RATIO  11.0f
 
-/* ── Status LED (DISABLED — pin reassigned to Lepton) ────────────── */
-// #define PIN_STATUS_LED      31
-
-/* ── Thermal Camera: FLIR Lepton 3.5 (SparkFun Breakout) ────────── */
-/* VoSPI: shares SPI3_HOST with IMU/MAG (bus serialized by ESP-IDF)
- * CCI:   I2C0 (no contention — USB webcam uses separate USB transport)
- * Note: SparkFun breakout has no RST pin — Lepton resets via I2C CCI */
-#define PIN_LEPTON_CS       31        /* was: Status LED */
-#define LEPTON_SPI_HOST     SENSOR_SPI_HOST   /* SPI3_HOST shared */
-#define LEPTON_I2C_ADDR     0x2A      /* 7-bit CCI address */
-#define LEPTON_SPI_FREQ     10000000  /* 10 MHz — conservative for signal integrity */
+/* ── Freed GPIOs ─────────────────────────────────────────────────── */
+/* GPIO 29 — was MAG SPI CS, now available
+ * GPIO 52 — was sensor SPI MOSI, now available (VoSPI has no MOSI) */
 
 /* ── Task Priorities ─────────────────────────────────────────────── */
 #define SENSOR_TASK_PRIORITY    6

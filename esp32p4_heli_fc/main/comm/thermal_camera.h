@@ -1,10 +1,15 @@
 /*
  * Thermal Camera — FLIR Lepton 3.5 via SPI (VoSPI) + I2C (CCI)
  *
- * SparkFun Lepton Breakout Board:
- *   VoSPI (video): SPI3_HOST shared with IMU/MAG, 10MHz Mode 3
- *   CCI (control): I2C0, addr 0x2A
+ * PureThermal Breakout Board (GroupGets):
+ *   VoSPI (video): SPI3_HOST dedicated, 20MHz Mode 3
+ *   CCI (control): I2C0 shared with IMU/MAG, addr 0x2A
+ *   EN: Active HIGH — controls Lepton module power
  *   Resolution: 160x120, Grey14 (2 bytes/pixel), ~9fps
+ *
+ * PureThermal Breakout Pinout:
+ *   1=SCL  2=SDA  3=VIN  4=GND  5=CLK
+ *   6=MISO 7=MOSI(NC) 8=CS 9=VSYNC 10=EN
  */
 #pragma once
 
@@ -16,7 +21,7 @@
 typedef void (*thermal_frame_cb_t)(const uint16_t *frame_data, size_t len, void *user_ctx);
 
 /**
- * Initialize SPI + I2C, reset Lepton, start VoSPI reader task.
+ * Initialize SPI + I2C, enable Lepton via EN pin, start VoSPI reader task.
  */
 esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx);
 

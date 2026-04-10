@@ -112,11 +112,11 @@ static void halow_comm_task(void *param)
         ESP_LOGI(TAG, "HTTP server active");
     }
 
-    /* === Thermal Camera (FLIR Lepton 3.5 via SPI VoSPI) === */
-    ESP_LOGI(TAG, "Initializing thermal camera (Lepton SPI)...");
+    /* === Thermal Camera (FLIR Lepton 3.5 — PureThermal Breakout Board) === */
+    ESP_LOGI(TAG, "Initializing thermal camera (PureThermal Breakout)...");
     err = thermal_camera_init(NULL, NULL);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Thermal camera not available (check Lepton SPI connection)");
+        ESP_LOGW(TAG, "Thermal camera not available (check PureThermal Breakout connection)");
     } else {
         thermal_camera_start();
         ESP_LOGI(TAG, "Thermal camera streaming (160x120 @ 9fps)");

@@ -324,8 +324,8 @@ static bool rate_check(uint32_t *last_ms, uint8_t hz)
 
 /* TX rate limiter: cap outbound packets to avoid saturating HaLow TX pool.
  * Dynamic: base 50 pkt/s, up to 100 at MCS5+. Critical msgs always pass. */
-#define TX_BUDGET_BASE_PER_SEC  30   /* base MAVLink packets per second — conservative for SPI */
-#define TX_BUDGET_MAX_PER_SEC   60   /* ceiling — shared SPI with thermal VoSPI */
+#define TX_BUDGET_BASE_PER_SEC  30   /* base MAVLink packets per second — conservative for HaLow */
+#define TX_BUDGET_MAX_PER_SEC   60   /* ceiling — leave headroom for camera + thermal streams */
 #define TX_BUDGET_WINDOW_MS   1000
 static uint32_t s_tx_budget_limit = TX_BUDGET_BASE_PER_SEC;
 static uint32_t s_tx_budget_count = 0;
@@ -1919,8 +1919,8 @@ void mavlink_handler_init(rpc_context_t *ctx, const mavlink_handler_config_t *co
     if (config) {
         s_config = *config;
     } else {
-        /* Conservative rates — must share SPI 16-page buffer with thermal VoSPI.
-         * Total MAVLink target: ~15 msg/s to leave headroom for thermal camera. */
+        /* Conservative rates — HaLow bandwidth is limited.
+         * Total MAVLink target: ~15 msg/s to leave headroom for camera streams. */
         s_config.heartbeat_hz  = 1;
         s_config.attitude_hz   = 4;
         s_config.gps_hz        = 2;

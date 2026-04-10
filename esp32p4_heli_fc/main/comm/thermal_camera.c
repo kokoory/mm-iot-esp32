@@ -1,19 +1,23 @@
 /*
  * Thermal Camera — FLIR Lepton 3.5 via SPI (VoSPI) + I2C (CCI)
  *
- * SparkFun Lepton Breakout Board connected to ESP32-P4:
- *   VoSPI: SPI3_HOST shared with IMU/MAG (10MHz, Mode 3)
- *   CCI:   I2C0 (address 0x2A)
- *   CS:    PIN_LEPTON_CS (GPIO 31)
- *   Note:  SparkFun breakout has no RST pin (reset via I2C CCI)
+ * PureThermal Breakout Board (GroupGets) connected to ESP32-P4:
+ *   VoSPI: SPI3_HOST dedicated (SCLK=22, MISO=30, CS=31) — 20MHz, Mode 3
+ *   CCI:   I2C0 shared with IMU/MAG (address 0x2A)
+ *   EN:    GPIO 28 — Active HIGH, controls Lepton module power
  *
  * Lepton 3.5: 160x120 @ ~9fps, Grey14 (2 bytes/pixel)
  * VoSPI frame = 4 segments x 60 packets x 164 bytes = 39,360 bytes
  *
+ * Architecture:
+ *   - sensor_agent (Core 0) creates I2C bus, signals ready via i2c_sync
+ *   - thermal_camera (Core 1) creates dedicated SPI bus, reuses I2C for CCI
+ *   - No SPI bus sharing — Lepton has exclusive SPI3_HOST access
+ *
  * References:
- *   - https://github.com/ducky64/arduino-lepton
- *   - FLIR Lepton Engineering Datasheet
- *   - VoSPI Implementation Specification
+ *   - GroupGets PureThermal Breakout Board Datasheet v1.3
+ *   - FLIR Lepton Engineering Datasheet (VoSPI spec)
+ *   - Lepton max SPI clock: 20MHz, MOSI not used (ground on breakout)
  */
 
 #include "thermal_camera.h"
@@ -39,7 +43,7 @@ static const char *TAG = "lepton";
 #define LEP_HEIGHT          120
 #define LEP_BPP             2       /* Grey14: 2 bytes/pixel */
 #define LEP_PKT_HEADER      4       /* 2 bytes ID + 2 bytes CRC */
-#define LEP_PKT_DATA       160      /* 80 pixels × 2 bytes (Grey14) */
+#define LEP_PKT_DATA       160      /* 80 pixels x 2 bytes (Grey14) */
 #define LEP_PKT_SIZE        (LEP_PKT_HEADER + LEP_PKT_DATA)  /* 164 */
 #define LEP_PKTS_PER_SEG    60
 #define LEP_SEGS_PER_FRAME   4
@@ -47,7 +51,7 @@ static const char *TAG = "lepton";
 #define LEP_FRAME_SIZE      (LEP_WIDTH * LEP_HEIGHT * LEP_BPP)  /* 38400 */
 
 #define LEP_RESYNC_MS       185     /* CS HIGH duration for resync */
-#define LEP_BOOT_WAIT_MS    950     /* Wait after reset before I2C */
+#define LEP_BOOT_WAIT_MS    950     /* Wait after EN assertion before I2C */
 
 /* Lepton I2C (CCI) registers */
 #define LEP_REG_STATUS      0x0002
@@ -79,6 +83,34 @@ static struct {
     TaskHandle_t task_handle;
 } s_lep = {0};
 
+/* ── EN pin control ──────────────────────────────────────────────── */
+
+static void lepton_en_init(void)
+{
+    gpio_config_t en_cfg = {
+        .pin_bit_mask = (1ULL << PIN_LEPTON_EN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+    gpio_config(&en_cfg);
+    gpio_set_level(PIN_LEPTON_EN, 0);  /* Start with Lepton off */
+}
+
+static void lepton_en_set(bool enable)
+{
+    gpio_set_level(PIN_LEPTON_EN, enable ? 1 : 0);
+}
+
+static void lepton_hard_reset(void)
+{
+    ESP_LOGI(TAG, "Hard reset via EN pin");
+    lepton_en_set(false);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    lepton_en_set(true);
+    vTaskDelay(pdMS_TO_TICKS(LEP_BOOT_WAIT_MS));
+}
+
 /* ── I2C CCI helpers ─────────────────────────────────────────────── */
 
 static esp_err_t lep_i2c_write_reg16(uint16_t reg, uint16_t val)
@@ -90,7 +122,7 @@ static esp_err_t lep_i2c_write_reg16(uint16_t reg, uint16_t val)
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = LEPTON_I2C_ADDR,
-        .scl_speed_hz = I2C_FREQ_HZ,
+        .scl_speed_hz = I2C_LEPTON_FREQ_HZ,
     };
     i2c_master_dev_handle_t dev = NULL;
     err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
@@ -114,7 +146,7 @@ static esp_err_t lep_i2c_read_reg16(uint16_t reg, uint16_t *val)
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = LEPTON_I2C_ADDR,
-        .scl_speed_hz = I2C_FREQ_HZ,
+        .scl_speed_hz = I2C_LEPTON_FREQ_HZ,
     };
     i2c_master_dev_handle_t dev = NULL;
     err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
@@ -166,6 +198,29 @@ static bool lep_check_boot(void)
     return false;
 }
 
+/* ── SPI bus initialization (dedicated for Lepton VoSPI) ──────────── */
+
+static esp_err_t init_lepton_spi_bus(void)
+{
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num = -1,              /* VoSPI is read-only — MOSI not used */
+        .miso_io_num = PIN_LEPTON_SPI_MISO,
+        .sclk_io_num = PIN_LEPTON_SPI_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LEP_PKT_SIZE,  /* 164 bytes per VoSPI packet */
+    };
+
+    esp_err_t err = spi_bus_initialize(LEPTON_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "Lepton SPI bus initialized (SCLK=%d, MISO=%d, dedicated)",
+             PIN_LEPTON_SPI_SCLK, PIN_LEPTON_SPI_MISO);
+    return ESP_OK;
+}
+
 /* ── VoSPI frame reader task ─────────────────────────────────────── */
 
 static void lepton_vospi_task(void *arg)
@@ -190,16 +245,17 @@ static void lepton_vospi_task(void *arg)
     ESP_LOGI(TAG, "VoSPI task started — reading 160x120 Grey14 @~9fps");
 
     while (1) {
-        /* CRITICAL: Acquire SPI bus for the entire frame.
+        /* Acquire SPI bus for the entire frame.
          * VoSPI requires uninterrupted CS-low during all 240 packets.
-         * Without this, IMU/MAG transactions interrupt CS → sync loss. */
+         * With dedicated bus this always succeeds immediately, but we keep
+         * the acquire/release pattern for spi_device_polling_transmit perf. */
         esp_err_t acq = spi_device_acquire_bus(s_lep.spi_dev, portMAX_DELAY);
         if (acq != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        /* Assemble one frame: 4 segments × 60 packets */
+        /* Assemble one frame: 4 segments x 60 packets */
         bool frame_ok = true;
 
         for (int seg = 1; seg <= LEP_SEGS_PER_FRAME && frame_ok; seg++) {
@@ -257,13 +313,13 @@ static void lepton_vospi_task(void *arg)
             }
         }
 
-        /* Release SPI bus ASAP so IMU/MAG can operate between frames */
+        /* Release SPI bus */
         spi_device_release_bus(s_lep.spi_dev);
 
         if (!frame_ok) {
             if (!synced) {
                 /* Resync: CS is already HIGH (bus released).
-                 * Wait ≥185ms per VoSPI spec for Lepton to reset sync. */
+                 * Wait >=185ms per VoSPI spec for Lepton to reset sync. */
                 s_lep.resync_count++;
                 ESP_LOGD(TAG, "VoSPI resync #%lu", (unsigned long)s_lep.resync_count);
                 vTaskDelay(pdMS_TO_TICKS(LEP_RESYNC_MS));
@@ -284,7 +340,7 @@ static void lepton_vospi_task(void *arg)
             xSemaphoreGive(s_lep.frame_mutex);
         }
 
-        /* Brief yield between frames — let IMU/MAG read sensors */
+        /* Brief yield between frames */
         vTaskDelay(pdMS_TO_TICKS(2));
 
         /* Periodic stats */
@@ -305,45 +361,32 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
 {
     if (s_lep.initialized) return ESP_OK;
 
-    ESP_LOGI(TAG, "Initializing FLIR Lepton 3.5 (SPI VoSPI + I2C CCI)");
-    ESP_LOGI(TAG, "  CS=GPIO%d, SPI=%d, I2C=0x%02X",
-             PIN_LEPTON_CS, LEPTON_SPI_HOST, LEPTON_I2C_ADDR);
+    ESP_LOGI(TAG, "Initializing FLIR Lepton 3.5 (PureThermal Breakout Board)");
+    ESP_LOGI(TAG, "  SPI: SCLK=%d, MISO=%d, CS=%d (%dMHz)",
+             PIN_LEPTON_SPI_SCLK, PIN_LEPTON_SPI_MISO, PIN_LEPTON_CS,
+             LEPTON_SPI_FREQ / 1000000);
+    ESP_LOGI(TAG, "  I2C: addr=0x%02X (%dkHz)", LEPTON_I2C_ADDR,
+             I2C_LEPTON_FREQ_HZ / 1000);
+    ESP_LOGI(TAG, "  EN: GPIO%d", PIN_LEPTON_EN);
 
-    /* No hardware RST — SparkFun breakout doesn't expose it.
-     * Lepton boots on power-up; CCI reset available if needed. */
-    ESP_LOGI(TAG, "Waiting %dms for Lepton boot...", LEP_BOOT_WAIT_MS);
+    /* Initialize EN pin and power on Lepton */
+    lepton_en_init();
+    lepton_en_set(true);
+    ESP_LOGI(TAG, "EN pin HIGH — waiting %dms for Lepton boot...", LEP_BOOT_WAIT_MS);
     vTaskDelay(pdMS_TO_TICKS(LEP_BOOT_WAIT_MS));
 
-    /* Wait for sensor SPI init to complete (Lepton shares SPI3_HOST) */
+    /* Wait for sensor_agent to finish I2C bus creation.
+     * We share I2C0 for Lepton CCI commands. */
     i2c_sync_wait_sensors();
 
-    /* Initialize I2C bus for Lepton CCI if not already created.
-     * sensor_agent only uses SPI — I2C bus must be created here. */
-    i2c_master_bus_handle_t i2c_bus = NULL;
-    esp_err_t bus_err = i2c_master_get_bus_handle(I2C_PORT, &i2c_bus);
-    if (bus_err != ESP_OK || i2c_bus == NULL) {
-        i2c_master_bus_config_t i2c_cfg = {
-            .clk_source = I2C_CLK_SRC_DEFAULT,
-            .i2c_port = I2C_PORT,
-            .scl_io_num = PIN_I2C_SCL,
-            .sda_io_num = PIN_I2C_SDA,
-            .glitch_ignore_cnt = 7,
-            .flags.enable_internal_pullup = true,
-        };
-        esp_err_t i2c_ret = i2c_new_master_bus(&i2c_cfg, &i2c_bus);
-        if (i2c_ret != ESP_OK) {
-            ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(i2c_ret));
-            ESP_LOGW(TAG, "Lepton CCI unavailable — VoSPI may still work");
-        } else {
-            ESP_LOGI(TAG, "I2C bus created (SCL=%d, SDA=%d) for Lepton CCI",
-                     PIN_I2C_SCL, PIN_I2C_SDA);
-        }
-    } else {
-        ESP_LOGI(TAG, "Reusing existing I2C bus for Lepton CCI");
+    /* Initialize dedicated SPI bus for VoSPI (no MOSI needed) */
+    esp_err_t ret = init_lepton_spi_bus();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPI bus init failed");
+        return ret;
     }
 
-    /* Add Lepton as SPI device on shared bus (SPI3_HOST)
-     * SPI Mode 3: CPOL=1, CPHA=1 — per VoSPI spec */
+    /* Add Lepton as SPI device — Mode 3 per VoSPI spec */
     spi_device_interface_config_t spi_cfg = {
         .clock_speed_hz = LEPTON_SPI_FREQ,
         .mode = 3,  /* CPOL=1, CPHA=1 */
@@ -351,12 +394,12 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         .queue_size = 1,
         .flags = 0,  /* Full-duplex: Lepton ignores MOSI, reads MISO */
     };
-    esp_err_t ret = spi_bus_add_device(LEPTON_SPI_HOST, &spi_cfg, &s_lep.spi_dev);
+    ret = spi_bus_add_device(LEPTON_SPI_HOST, &spi_cfg, &s_lep.spi_dev);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI device add failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "SPI device added on SPI3_HOST (%dMHz, Mode 3)",
+    ESP_LOGI(TAG, "SPI device added (%dMHz, Mode 3, dedicated bus)",
              LEPTON_SPI_FREQ / 1000000);
 
     /* Check Lepton boot status via I2C CCI */
@@ -369,7 +412,18 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     if (!booted) {
-        ESP_LOGW(TAG, "Lepton did not report boot — continuing anyway (may resync)");
+        ESP_LOGW(TAG, "Lepton did not report boot — trying hard reset...");
+        lepton_hard_reset();
+        for (int i = 0; i < 10; i++) {
+            if (lep_check_boot()) {
+                booted = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        if (!booted) {
+            ESP_LOGW(TAG, "Lepton still not booted — continuing (may resync via VoSPI)");
+        }
     }
 
     /* Allocate buffers */
@@ -386,7 +440,6 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
     xTaskCreatePinnedToCore(lepton_vospi_task, "lepton", 4096, NULL, 6, &s_lep.task_handle, 1);
 
     s_lep.initialized = true;
-    /* active is set to true by thermal_camera_start() or when first frame arrives */
     ESP_LOGI(TAG, "Lepton 3.5 initialized (160x120 Grey14, ~9fps)");
     return ESP_OK;
 }
