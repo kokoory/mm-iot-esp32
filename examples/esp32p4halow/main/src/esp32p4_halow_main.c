@@ -3,10 +3,11 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * Integrates three subsystems:
+ * Integrates four subsystems:
  *   1. Wi-Fi HaLow (Wio-WM6180) - Long-range sub-GHz wireless link
  *   2. MIPI-CSI Camera + H.264  - Hardware-encoded video streaming
  *   3. MAVLink UART (Pixhawk)   - Bidirectional telemetry bridge
+ *   4. FLIR Lepton 3.x thermal  - 160x120 thermal imaging (SPI3/I2C1)
  *
  * Hardware:
  *   - Waveshare ESP32-P4-WIFI6 board
@@ -44,6 +45,7 @@
 #include "mm_app_common.h"
 #include "camera_h264.h"
 #include "mavlink_uart.h"
+#include "lepton_thermal.h"
 
 static const char *TAG = "p4_halow_drone";
 
@@ -66,6 +68,7 @@ static void print_status(void)
            (unsigned long)mav_stats.udp_tx_packets);
     printf("UART RX rate: %.0f bytes/sec\n", mav_stats.uart_rx_rate);
     printf("Camera FPS: %.1f\n", camera_get_fps());
+    printf("Thermal FPS: %.1f\n", lepton_get_fps());
     printf("Free heap: %lu bytes (PSRAM: %lu bytes)\n",
            (unsigned long)esp_get_free_heap_size(),
            (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -121,6 +124,19 @@ void app_main(void)
         httpd_handle_t server = camera_stream_server_start();
         if (server) {
             ESP_LOGI(TAG, "Camera streaming active");
+        }
+    }
+
+    /* === Phase 4: Thermal Camera (FLIR Lepton 3.x) === */
+    ESP_LOGI(TAG, "Phase 4: Initializing FLIR Lepton thermal camera...");
+    err = lepton_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Lepton init failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Continuing without thermal camera");
+    } else {
+        err = lepton_start();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Thermal camera active (160x120 @ ~8.7fps)");
         }
     }
 

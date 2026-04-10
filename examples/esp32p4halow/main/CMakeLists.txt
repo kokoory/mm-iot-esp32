@@ -3,6 +3,7 @@ set(src
     "src/mm_app_common.c"
     "src/camera_h264.c"
     "src/mavlink_uart.c"
+    "src/lepton_thermal.c"
     "src/esp32p4_halow_main.c")
 
 set(inc
