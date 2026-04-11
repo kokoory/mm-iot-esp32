@@ -216,10 +216,9 @@ void app_wlan_init(void)
     status = mmwlan_register_tx_flow_control_cb(tx_flow_control_cb, NULL);
     printf("TX flow control callback registered (status=%d)\n", status);
 
-    /* Auto rate adaptation: let the chip pick the best MCS/BW/GI.
-     * MMWLAN_MCS_NONE = no override → chip uses rate control algorithm.
-     * Previously MCS2 was forced, limiting throughput to ~1.95Mbps PHY.
-     * With auto, the chip can use MCS5-7 at close range (~5-8Mbps PHY). */
+    /* Auto rate adaptation: chip picks best MCS/BW/GI based on link quality.
+     * Management frames use low MCS for reliable association.
+     * Data frames scale up to MCS7+ at close range. */
     status = mmwlan_ate_override_rate_control(MMWLAN_MCS_NONE, MMWLAN_BW_NONE, MMWLAN_GI_NONE);
     printf("Rate control: AUTO (no override) status=%d\n", status);
 

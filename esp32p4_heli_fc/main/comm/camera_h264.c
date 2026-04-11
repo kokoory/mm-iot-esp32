@@ -35,9 +35,9 @@ static const char *TAG = "usb_cam";
 #define USB_CAM_FPS         15
 #define USB_CAM_MAX_FRAME   (100 * 1024)  /* 100KB max MJPEG frame */
 
-/* Stream target FPS over HaLow — ~43KB/frame, HaLow ~100KB/s effective.
- * 2fps x 43KB = 86KB/s fits comfortably within HaLow bandwidth. */
-#define STREAM_TARGET_FPS   2
+/* Stream target FPS over HaLow — ~32KB/frame, MCS2 2MHz ~160KB/s effective.
+ * 3fps x 32KB = 96KB/s fits within MCS2 2MHz bandwidth. */
+#define STREAM_TARGET_FPS   3
 #define STREAM_INTERVAL_MS  (1000 / STREAM_TARGET_FPS)
 
 /* Double buffer for MJPEG frames */
