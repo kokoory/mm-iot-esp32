@@ -32,7 +32,7 @@ static const char *TAG = "usb_cam";
 #define USB_CAM_PID         0x082D  /* C920 HD Pro Webcam */
 #define USB_CAM_WIDTH       640
 #define USB_CAM_HEIGHT      480
-#define USB_CAM_FPS         15
+#define USB_CAM_FPS         5
 #define USB_CAM_MAX_FRAME   (100 * 1024)  /* 100KB max MJPEG frame */
 
 /* Stream target FPS over HaLow — ~43KB/frame, HaLow ~100KB/s effective.
