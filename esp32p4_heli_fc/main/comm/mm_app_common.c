@@ -35,6 +35,9 @@ static void tx_flow_control_cb(enum mmwlan_tx_flow_control_state state, void *ar
     if (state == MMWLAN_TX_PAUSED) {
         s_tx_paused = true;
         s_tx_pause_count++;
+        if ((s_tx_pause_count % 20) == 1) {
+            printf("HaLow TX PAUSED (count=%lu)\n", (unsigned long)s_tx_pause_count);
+        }
     } else {
         s_tx_paused = false;
     }

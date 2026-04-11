@@ -24,6 +24,7 @@
 
 #include "usb/usb_host.h"
 #include "usb/uvc_host.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "usb_cam";
 
@@ -360,13 +361,18 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
 
+    /* Disable Nagle algorithm — prevents 200ms delay on small boundary header.
+     * Without this, TCP holds the 128-byte header waiting to fill a segment. */
+    int fd = httpd_req_to_sockfd(req);
+    int nodelay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
     s_cam.mjpeg_clients++;
     ESP_LOGI(TAG, "MJPEG HTTP client connected (%d active, %dfps target)",
              s_cam.mjpeg_clients, STREAM_TARGET_FPS);
 
     esp_err_t res = ESP_OK;
     char part_hdr[128];
-    int64_t last_send_us = 0;
 
     while (res == ESP_OK) {
         /* Camera may have been disconnected while streaming */
@@ -375,23 +381,14 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
             break;
         }
 
-        /* Wait for a new JPEG frame from UVC callback */
+        /* Wait for a new JPEG frame from UVC callback.
+         * No drain loop — the TCP send time (~300-800ms) is the natural
+         * throttle. Draining discards frames that arrived during send. */
         if (xSemaphoreTake(s_cam.frame_ready, pdMS_TO_TICKS(5000)) != pdTRUE) {
-            continue;  /* Timeout — keep connection alive, try again */
-        }
-
-        /* Drain extra semaphore signals (USB cam runs at 5fps,
-         * we only send at STREAM_TARGET_FPS) */
-        while (xSemaphoreTake(s_cam.frame_ready, 0) == pdTRUE) { }
-
-        /* Frame rate throttle: skip if too soon since last send */
-        int64_t now_us = esp_timer_get_time();
-        if ((now_us - last_send_us) < (STREAM_INTERVAL_MS * 1000)) {
             continue;
         }
 
-        /* Copy frame to per-client send buffer under mutex — prevents
-         * race with UVC callback overwriting jpeg_buf during TCP send */
+        /* Copy latest frame to per-client send buffer under mutex */
         size_t send_len = 0;
         if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             int rd_idx = s_cam.jpeg_read_idx;
@@ -404,16 +401,15 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
 
         if (send_len == 0) continue;
 
-        /* Send multipart boundary + JPEG content-type header */
+        /* Prepend multipart boundary+header directly into send_buf
+         * to avoid two separate TCP sends (Nagle interaction) */
         int hdr_len = snprintf(part_hdr, sizeof(part_hdr),
             "%sContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
             STREAM_BOUNDARY, (unsigned)send_len);
 
-        res = httpd_resp_send_chunk(req, part_hdr, hdr_len);
-        if (res != ESP_OK) break;
-
-        res = httpd_resp_send_chunk(req, (const char *)send_buf, send_len);
-        last_send_us = esp_timer_get_time();
+        memmove(send_buf + hdr_len, send_buf, send_len);
+        memcpy(send_buf, part_hdr, hdr_len);
+        res = httpd_resp_send_chunk(req, (const char *)send_buf, hdr_len + send_len);
     }
 
     free(send_buf);
