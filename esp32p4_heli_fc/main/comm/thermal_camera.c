@@ -65,6 +65,7 @@ static struct {
     bool active;
 
     spi_device_handle_t spi_dev;
+    i2c_master_dev_handle_t cci_dev;  /* Persistent I2C handle for Lepton CCI */
 
     /* Double buffer in PSRAM */
     uint16_t *frame_buf;        /* Latest complete frame (Y16) */
@@ -111,9 +112,9 @@ static void lepton_hard_reset(void)
     vTaskDelay(pdMS_TO_TICKS(LEP_BOOT_WAIT_MS));
 }
 
-/* ── I2C CCI helpers ─────────────────────────────────────────────── */
+/* ── I2C CCI helpers (use persistent s_lep.cci_dev handle) ──────── */
 
-static esp_err_t lep_i2c_write_reg16(uint16_t reg, uint16_t val)
+static esp_err_t lep_cci_dev_init(void)
 {
     i2c_master_bus_handle_t bus = NULL;
     esp_err_t err = i2c_master_get_bus_handle(I2C_PORT, &bus);
@@ -124,41 +125,35 @@ static esp_err_t lep_i2c_write_reg16(uint16_t reg, uint16_t val)
         .device_address = LEPTON_I2C_ADDR,
         .scl_speed_hz = I2C_LEPTON_FREQ_HZ,
     };
-    i2c_master_dev_handle_t dev = NULL;
-    err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
-    if (err != ESP_OK) return err;
+    err = i2c_master_bus_add_device(bus, &dev_cfg, &s_lep.cci_dev);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add Lepton CCI I2C device: %s", esp_err_to_name(err));
+        s_lep.cci_dev = NULL;
+    }
+    return err;
+}
+
+static esp_err_t lep_i2c_write_reg16(uint16_t reg, uint16_t val)
+{
+    if (!s_lep.cci_dev) return ESP_FAIL;
 
     uint8_t buf[4] = {
         (reg >> 8) & 0xFF, reg & 0xFF,
         (val >> 8) & 0xFF, val & 0xFF,
     };
-    err = i2c_master_transmit(dev, buf, 4, 100);
-    i2c_master_bus_rm_device(dev);
-    return err;
+    return i2c_master_transmit(s_lep.cci_dev, buf, 4, 100);
 }
 
 static esp_err_t lep_i2c_read_reg16(uint16_t reg, uint16_t *val)
 {
-    i2c_master_bus_handle_t bus = NULL;
-    esp_err_t err = i2c_master_get_bus_handle(I2C_PORT, &bus);
-    if (err != ESP_OK || bus == NULL) return ESP_FAIL;
-
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = LEPTON_I2C_ADDR,
-        .scl_speed_hz = I2C_LEPTON_FREQ_HZ,
-    };
-    i2c_master_dev_handle_t dev = NULL;
-    err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
-    if (err != ESP_OK) return err;
+    if (!s_lep.cci_dev) return ESP_FAIL;
 
     uint8_t reg_buf[2] = { (reg >> 8) & 0xFF, reg & 0xFF };
     uint8_t data_buf[2] = {0};
-    err = i2c_master_transmit_receive(dev, reg_buf, 2, data_buf, 2, 100);
+    esp_err_t err = i2c_master_transmit_receive(s_lep.cci_dev, reg_buf, 2, data_buf, 2, 100);
     if (err == ESP_OK) {
         *val = ((uint16_t)data_buf[0] << 8) | data_buf[1];
     }
-    i2c_master_bus_rm_device(dev);
     return err;
 }
 
@@ -245,24 +240,16 @@ static void lepton_vospi_task(void *arg)
     ESP_LOGI(TAG, "VoSPI task started — reading 160x120 Grey14 @~9fps");
 
     while (1) {
-        /* Acquire SPI bus for the entire frame.
-         * VoSPI requires uninterrupted CS-low during all 240 packets.
-         * With dedicated bus this always succeeds immediately, but we keep
-         * the acquire/release pattern for spi_device_polling_transmit perf. */
-        esp_err_t acq = spi_device_acquire_bus(s_lep.spi_dev, portMAX_DELAY);
-        if (acq != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-
-        /* Assemble one frame: 4 segments x 60 packets */
+        /* Assemble one frame: 4 segments x 60 packets
+         * Uses interrupt-based spi_device_transmit so the CPU is released
+         * during DMA transfer, allowing USB Host and HTTP tasks to run. */
         bool frame_ok = true;
 
         for (int seg = 1; seg <= LEP_SEGS_PER_FRAME && frame_ok; seg++) {
             bool discard_seg = false;
 
             for (int pkt_num = 0; pkt_num < LEP_PKTS_PER_SEG && frame_ok; ) {
-                esp_err_t err = spi_device_polling_transmit(s_lep.spi_dev, &trans);
+                esp_err_t err = spi_device_transmit(s_lep.spi_dev, &trans);
                 if (err != ESP_OK) {
                     ESP_LOGE(TAG, "SPI read failed: %s", esp_err_to_name(err));
                     frame_ok = false;
@@ -313,9 +300,6 @@ static void lepton_vospi_task(void *arg)
             }
         }
 
-        /* Release SPI bus */
-        spi_device_release_bus(s_lep.spi_dev);
-
         if (!frame_ok) {
             if (!synced) {
                 /* Resync: CS is already HIGH (bus released).
@@ -335,7 +319,12 @@ static void lepton_vospi_task(void *arg)
         s_lep.frame_count++;
 
         if (xSemaphoreTake(s_lep.frame_mutex, 0) == pdTRUE) {
-            memcpy(s_lep.frame_buf, s_lep.vospi_buf, LEP_FRAME_SIZE);
+            /* VoSPI data is big-endian — byte-swap to native little-endian */
+            const uint8_t *src = s_lep.vospi_buf;
+            uint16_t *dst = s_lep.frame_buf;
+            for (int p = 0; p < LEP_WIDTH * LEP_HEIGHT; p++) {
+                dst[p] = ((uint16_t)src[p * 2] << 8) | src[p * 2 + 1];
+            }
             s_lep.frame_valid = true;
             xSemaphoreGive(s_lep.frame_mutex);
         }
@@ -379,8 +368,14 @@ esp_err_t thermal_camera_init(thermal_frame_cb_t frame_cb, void *user_ctx)
      * We share I2C0 for Lepton CCI commands. */
     i2c_sync_wait_sensors();
 
+    /* Create persistent I2C device handle for CCI commands */
+    esp_err_t ret = lep_cci_dev_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "CCI I2C device init failed — boot check/commands unavailable");
+    }
+
     /* Initialize dedicated SPI bus for VoSPI (no MOSI needed) */
-    esp_err_t ret = init_lepton_spi_bus();
+    ret = init_lepton_spi_bus();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI bus init failed");
         return ret;

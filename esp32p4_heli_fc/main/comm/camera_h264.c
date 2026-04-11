@@ -27,12 +27,12 @@
 
 static const char *TAG = "usb_cam";
 
-/* USB camera configuration — Logitech C920 */
+/* USB camera configuration — Logitech C922 Pro Stream */
 #define USB_CAM_VID         0x046D  /* Logitech */
-#define USB_CAM_PID         0x082D  /* C920 HD Pro Webcam */
+#define USB_CAM_PID         0x085C  /* C922 Pro Stream Webcam */
 #define USB_CAM_WIDTH       640
 #define USB_CAM_HEIGHT      480
-#define USB_CAM_FPS         5
+#define USB_CAM_FPS         15
 #define USB_CAM_MAX_FRAME   (100 * 1024)  /* 100KB max MJPEG frame */
 
 /* Stream target FPS over HaLow — ~43KB/frame, HaLow ~100KB/s effective.
@@ -55,10 +55,6 @@ static struct {
     SemaphoreHandle_t frame_ready;
     SemaphoreHandle_t jpeg_mutex;
 
-    /* Send buffer — frame is copied here under mutex before slow TCP send */
-    uint8_t *send_buf;
-    size_t send_buf_size;
-
     /* Frame statistics */
     volatile float fps;
     uint32_t frame_count;
@@ -69,6 +65,9 @@ static struct {
 
     /* UVC handle */
     uvc_host_stream_hdl_t uvc_stream;
+
+    /* USB overflow stats */
+    uint32_t overflow_count;
 } s_cam = {0};
 
 
@@ -152,10 +151,17 @@ static void uvc_stream_callback(const uvc_host_stream_event_data_t *event, void 
         ESP_LOGW(TAG, "UVC transfer error");
         break;
     case UVC_HOST_DEVICE_DISCONNECTED:
-        ESP_LOGW(TAG, "USB camera disconnected");
+        ESP_LOGW(TAG, "USB camera disconnected — marking inactive");
+        s_cam.initialized = false;
+        s_cam.uvc_stream = NULL;
+        s_cam.fps = 0;
         break;
     case UVC_HOST_FRAME_BUFFER_OVERFLOW:
-        ESP_LOGW(TAG, "Frame buffer overflow");
+        s_cam.overflow_count++;
+        if ((s_cam.overflow_count % 50) == 1) {
+            ESP_LOGW(TAG, "Frame buffer overflow (total: %lu)",
+                     (unsigned long)s_cam.overflow_count);
+        }
         break;
     default:
         break;
@@ -187,15 +193,8 @@ esp_err_t camera_h264_init(void)
             return ESP_ERR_NO_MEM;
         }
     }
-    /* Send buffer: frame copied here under mutex before slow TCP send */
-    s_cam.send_buf = heap_caps_calloc(1, USB_CAM_MAX_FRAME, MALLOC_CAP_SPIRAM);
-    if (!s_cam.send_buf) {
-        ESP_LOGE(TAG, "Failed to allocate send buffer");
-        return ESP_ERR_NO_MEM;
-    }
 
-    ESP_LOGI(TAG, "MJPEG buffers: %d x %uKB + send %uKB (PSRAM)", NUM_BUFS,
-             (unsigned)(USB_CAM_MAX_FRAME / 1024),
+    ESP_LOGI(TAG, "MJPEG buffers: %d x %uKB (PSRAM)", NUM_BUFS,
              (unsigned)(USB_CAM_MAX_FRAME / 1024));
 
     /* Install USB Host Library */
@@ -224,14 +223,16 @@ esp_err_t camera_h264_init(void)
         return ret;
     }
 
-    /* Open UVC stream — Logitech C920 (or any UVC webcam) */
+    /* Open UVC stream — accept any UVC webcam.
+     * C920 has multiple HW revisions with different PIDs (0x082D, 0x0892, 0x08E5),
+     * so we match by Logitech VID only, then fall back to any UVC device. */
     uvc_host_stream_config_t stream_config = {
         .event_cb = uvc_stream_callback,
         .frame_cb = uvc_frame_callback,
         .user_ctx = NULL,
         .usb = {
             .vid = USB_CAM_VID,
-            .pid = USB_CAM_PID,
+            .pid = 0,               /* Any Logitech UVC device */
         },
         .vs_format = {
             .h_res = USB_CAM_WIDTH,
@@ -248,21 +249,18 @@ esp_err_t camera_h264_init(void)
         },
     };
 
-    ESP_LOGI(TAG, "Waiting for USB camera (VID=0x%04X PID=0x%04X MJPEG %dx%d@%dfps)...",
-             USB_CAM_VID, USB_CAM_PID, USB_CAM_WIDTH, USB_CAM_HEIGHT, USB_CAM_FPS);
+    ESP_LOGI(TAG, "Waiting for USB camera (VID=0x%04X MJPEG %dx%d@%dfps)...",
+             USB_CAM_VID, USB_CAM_WIDTH, USB_CAM_HEIGHT, USB_CAM_FPS);
     ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(15000), &s_cam.uvc_stream);
     if (ret != ESP_OK) {
-        /* Exact VID/PID failed — retry accepting any UVC device */
-        ESP_LOGW(TAG, "C920 open failed (%s), retrying with any UVC device...",
+        /* Logitech VID failed — retry accepting any UVC device */
+        ESP_LOGW(TAG, "Logitech VID open failed (%s), retrying with any UVC device...",
                  esp_err_to_name(ret));
         stream_config.usb.vid = 0;
-        stream_config.usb.pid = 0;
         ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(15000), &s_cam.uvc_stream);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "UVC stream open failed: %s (is USB camera connected?)",
                      esp_err_to_name(ret));
-            /* Return error — camera_h264_init caller will log and continue.
-             * HTTP server still starts for thermal camera + status. */
             s_cam.uvc_stream = NULL;
             return ret;
         }
@@ -272,6 +270,10 @@ esp_err_t camera_h264_init(void)
              stream_config.vs_format.h_res,
              stream_config.vs_format.v_res,
              stream_config.vs_format.fps);
+
+    /* Brief delay before starting stream — some USB devices need time
+     * to finalize format negotiation after stream_open */
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     /* Start UVC streaming */
     ret = uvc_host_stream_start(s_cam.uvc_stream);
@@ -298,15 +300,23 @@ static esp_err_t stream_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req,
-        "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:20px'>"
-        "<h2>ESP32-P4 Helicopter</h2>"
-        "<div><img id='cam' style='max-width:100%;border:1px solid #444' /></div>"
-        "<p style='color:#0f0;font-size:12px'>USB Webcam MJPEG 640x480 (port 81)</p>"
-        "<script>document.getElementById('cam').src='http://'+location.hostname+':81/mjpeg';</script>"
-        "<p><a href='/thermal' style='color:#0af;font-size:18px'>Thermal Camera</a></p>"
-        "<p><a href='/status' style='color:#0af;font-size:14px'>Status</a></p>"
-        "</body></html>", HTTPD_RESP_USE_STRLEN);
+    /* Build page based on camera availability */
+    const char *page = (s_cam.initialized && s_cam.uvc_stream)
+        ? "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:20px'>"
+          "<h2>ESP32-P4 Helicopter</h2>"
+          "<div><img id='cam' style='max-width:100%;border:1px solid #444' /></div>"
+          "<p style='color:#0f0;font-size:12px'>USB Webcam MJPEG 640x480 (port 81)</p>"
+          "<script>document.getElementById('cam').src='http://'+location.hostname+':81/mjpeg';</script>"
+          "<p><a href='/thermal' style='color:#0af;font-size:18px'>Thermal Camera</a></p>"
+          "<p><a href='/status' style='color:#0af;font-size:14px'>Status</a></p>"
+          "</body></html>"
+        : "<html><body style='background:#111;color:#eee;font-family:monospace;text-align:center;padding:20px'>"
+          "<h2>ESP32-P4 Helicopter</h2>"
+          "<p style='color:#f80'>USB Webcam: not available</p>"
+          "<p><a href='/thermal' style='color:#0af;font-size:22px;font-weight:bold'>Thermal Camera (LIVE)</a></p>"
+          "<p><a href='/status' style='color:#0af;font-size:14px'>Status</a></p>"
+          "</body></html>";
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t status_handler(httpd_req_t *req)
@@ -316,11 +326,13 @@ static esp_err_t status_handler(httpd_req_t *req)
         "{\"initialized\":%s,\"resolution\":\"%dx%d\",\"fps\":%.1f,"
         "\"encoder\":\"usb_mjpeg\",\"transport\":\"http_tcp\","
         "\"mjpeg_clients\":%d,"
+        "\"overflow_count\":%lu,"
         "\"pipeline\":\"usb_uvc_mjpeg\","
         "\"stream_url\":\"/mjpeg\"}",
         s_cam.initialized ? "true" : "false",
         USB_CAM_WIDTH, USB_CAM_HEIGHT, s_cam.fps,
-        s_cam.mjpeg_clients);
+        s_cam.mjpeg_clients,
+        (unsigned long)s_cam.overflow_count);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -336,6 +348,14 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
         return httpd_resp_send(req, "Camera not available", HTTPD_RESP_USE_STRLEN);
     }
 
+    /* Per-client send buffer — each HTTP client gets its own copy so
+     * concurrent streams don't corrupt each other during slow TCP sends */
+    uint8_t *send_buf = heap_caps_malloc(USB_CAM_MAX_FRAME, MALLOC_CAP_SPIRAM);
+    if (!send_buf) {
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_send(req, "Out of memory", HTTPD_RESP_USE_STRLEN);
+    }
+
     httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
@@ -349,12 +369,18 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
     int64_t last_send_us = 0;
 
     while (res == ESP_OK) {
+        /* Camera may have been disconnected while streaming */
+        if (!s_cam.initialized || !s_cam.uvc_stream) {
+            ESP_LOGW(TAG, "Camera lost during stream");
+            break;
+        }
+
         /* Wait for a new JPEG frame from UVC callback */
         if (xSemaphoreTake(s_cam.frame_ready, pdMS_TO_TICKS(5000)) != pdTRUE) {
             continue;  /* Timeout — keep connection alive, try again */
         }
 
-        /* Drain extra semaphore signals (USB cam runs at 15fps,
+        /* Drain extra semaphore signals (USB cam runs at 5fps,
          * we only send at STREAM_TARGET_FPS) */
         while (xSemaphoreTake(s_cam.frame_ready, 0) == pdTRUE) { }
 
@@ -364,14 +390,14 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
             continue;
         }
 
-        /* Copy frame to send buffer under mutex — prevents race condition
-         * where UVC callback overwrites jpeg_buf during slow TCP send */
+        /* Copy frame to per-client send buffer under mutex — prevents
+         * race with UVC callback overwriting jpeg_buf during TCP send */
         size_t send_len = 0;
         if (xSemaphoreTake(s_cam.jpeg_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             int rd_idx = s_cam.jpeg_read_idx;
             send_len = s_cam.jpeg_size[rd_idx];
             if (send_len > 0 && send_len <= USB_CAM_MAX_FRAME) {
-                memcpy(s_cam.send_buf, s_cam.jpeg_buf[rd_idx], send_len);
+                memcpy(send_buf, s_cam.jpeg_buf[rd_idx], send_len);
             }
             xSemaphoreGive(s_cam.jpeg_mutex);
         }
@@ -386,11 +412,11 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
         res = httpd_resp_send_chunk(req, part_hdr, hdr_len);
         if (res != ESP_OK) break;
 
-        /* Send from send_buf — safe from UVC callback overwrites */
-        res = httpd_resp_send_chunk(req, (const char *)s_cam.send_buf, send_len);
+        res = httpd_resp_send_chunk(req, (const char *)send_buf, send_len);
         last_send_us = esp_timer_get_time();
     }
 
+    free(send_buf);
     s_cam.mjpeg_clients--;
     ESP_LOGI(TAG, "MJPEG HTTP client disconnected (%d active)", s_cam.mjpeg_clients);
     return res;
@@ -416,14 +442,7 @@ static const char THERMAL_HTML[] =
 "const info=document.getElementById('info');"
 "let frames=0,lastT=performance.now(),pollMs=111,errCnt=0,tempStr='';"
 "const lut=new Uint8Array(256*3);"
-"for(let i=0;i<256;i++){"
-"  let r,g,b;"
-"  if(i<64){r=0;g=0;b=i*4;}"
-"  else if(i<128){let t=(i-64)*4;r=t;g=0;b=255-t;}"
-"  else if(i<192){let t=(i-128)*4;r=255;g=t;b=0;}"
-"  else{let t=(i-192)*4;r=255;g=255;b=t;}"
-"  lut[i*3]=r;lut[i*3+1]=g;lut[i*3+2]=b;"
-"}"
+"for(let i=0;i<256;i++){lut[i*3]=i;lut[i*3+1]=i;lut[i*3+2]=i;}"
 "const SCALE=4;"
 "let imgData=null,w=0,h=0;"
 "async function poll(){"
@@ -463,7 +482,8 @@ static const char THERMAL_HTML[] =
 "    }"
 "    const d=imgData.data;"
 "    for(let i=0;i<npix;i++){"
-"      const idx=y[i];"
+"      let idx=y[i]+((Math.random()-0.5)*2)|0;"
+"      if(idx<0)idx=0;if(idx>255)idx=255;"
 "      d[i*4]=lut[idx*3];d[i*4+1]=lut[idx*3+1];d[i*4+2]=lut[idx*3+2];d[i*4+3]=255;"
 "    }"
 "    ctx.putImageData(imgData,0,0);"
@@ -490,6 +510,15 @@ static esp_err_t thermal_page_handler(httpd_req_t *req)
     return httpd_resp_send(req, THERMAL_HTML, strlen(THERMAL_HTML));
 }
 
+/* Static buffers for thermal /raw — avoids per-request heap allocation.
+ * 160x120 = 19200 pixels: y16_buf = 38400B, out = 19204B */
+#define THERMAL_NPIX    (160 * 120)
+#define THERMAL_NSAMP   (THERMAL_NPIX / 4)  /* Subsample for percentile sort */
+static uint16_t *s_thermal_y16 = NULL;   /* Allocated once in PSRAM */
+static uint8_t  *s_thermal_out = NULL;
+static uint16_t *s_thermal_sort = NULL;  /* Subsample sort buffer */
+static SemaphoreHandle_t s_thermal_raw_mutex = NULL;
+
 static esp_err_t thermal_raw_handler(httpd_req_t *req)
 {
     if (!thermal_camera_is_active()) {
@@ -498,44 +527,62 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
         return httpd_resp_send(req, NULL, 0);
     }
 
+    /* Serialize access to static buffers */
+    if (!s_thermal_raw_mutex ||
+        xSemaphoreTake(s_thermal_raw_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        httpd_resp_set_status(req, "204 No Content");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        return httpd_resp_send(req, NULL, 0);
+    }
+
     unsigned tw = thermal_camera_width();
     unsigned th = thermal_camera_height();
-    size_t frame_sz = thermal_camera_frame_size();
     unsigned npix = tw * th;
 
-    uint16_t *y16_buf = heap_caps_malloc(frame_sz, MALLOC_CAP_SPIRAM);
-    if (!y16_buf) {
+    if (!thermal_camera_get_frame(s_thermal_y16)) {
+        xSemaphoreGive(s_thermal_raw_mutex);
         httpd_resp_set_status(req, "204 No Content");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         return httpd_resp_send(req, NULL, 0);
     }
 
-    if (!thermal_camera_get_frame(y16_buf)) {
-        free(y16_buf);
-        httpd_resp_set_status(req, "204 No Content");
-        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-        return httpd_resp_send(req, NULL, 0);
+    /* Percentile normalization — clips FPN outlier pixels from uncalibrated Lepton.
+     * Sorts a subset of pixels to find exact 2nd/98th percentile. */
+    uint16_t pmin, pmax;
+    {
+        unsigned nsamp = npix / 4;
+        uint16_t *samp = s_thermal_sort;
+        /* Subsample every 4th pixel for speed */
+        for (unsigned i = 0; i < nsamp; i++) {
+            samp[i] = s_thermal_y16[i * 4];
+        }
+        /* Simple insertion sort on subsample (nsamp=4800, fast enough) */
+        for (unsigned i = 1; i < nsamp; i++) {
+            uint16_t key = samp[i];
+            int j = (int)i - 1;
+            while (j >= 0 && samp[j] > key) {
+                samp[j + 1] = samp[j];
+                j--;
+            }
+            samp[j + 1] = key;
+        }
+        pmin = samp[nsamp * 2 / 100];    /* 2nd percentile */
+        pmax = samp[nsamp * 98 / 100];   /* 98th percentile */
+        if (pmax <= pmin) pmax = pmin + 1;
     }
 
-    /* Compact format: 4-byte header (vmin_LE16, vmax_LE16) + npix bytes (8-bit normalized) */
-    uint16_t vmin = 65535, vmax = 0;
+    s_thermal_out[0] = pmin & 0xFF; s_thermal_out[1] = (pmin >> 8) & 0xFF;
+    s_thermal_out[2] = pmax & 0xFF; s_thermal_out[3] = (pmax >> 8) & 0xFF;
+
+    uint16_t rng = pmax - pmin;
     for (unsigned i = 0; i < npix; i++) {
-        if (y16_buf[i] < vmin) vmin = y16_buf[i];
-        if (y16_buf[i] > vmax) vmax = y16_buf[i];
+        uint16_t v = s_thermal_y16[i];
+        if (v <= pmin) { s_thermal_out[4 + i] = 0; }
+        else if (v >= pmax) { s_thermal_out[4 + i] = 255; }
+        else { s_thermal_out[4 + i] = (uint8_t)(((uint32_t)(v - pmin) * 255) / rng); }
     }
-    uint16_t rng = (vmax > vmin) ? (vmax - vmin) : 1;
 
     size_t out_sz = 4 + npix;
-    uint8_t *out = heap_caps_malloc(out_sz, MALLOC_CAP_SPIRAM);
-    if (!out) { free(y16_buf); return httpd_resp_send(req, NULL, 0); }
-
-    out[0] = vmin & 0xFF; out[1] = (vmin >> 8) & 0xFF;
-    out[2] = vmax & 0xFF; out[3] = (vmax >> 8) & 0xFF;
-
-    for (unsigned i = 0; i < npix; i++) {
-        out[4 + i] = (uint8_t)(((uint32_t)(y16_buf[i] - vmin) * 255) / rng);
-    }
-    free(y16_buf);
 
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -548,8 +595,8 @@ static esp_err_t thermal_raw_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "X-Thermal-Width", w_str);
     httpd_resp_set_hdr(req, "X-Thermal-Height", h_str);
 
-    esp_err_t res = httpd_resp_send(req, (const char *)out, out_sz);
-    free(out);
+    esp_err_t res = httpd_resp_send(req, (const char *)s_thermal_out, out_sz);
+    xSemaphoreGive(s_thermal_raw_mutex);
     return res;
 }
 
@@ -588,6 +635,14 @@ static const httpd_uri_t uri_mjpeg = {
 
 httpd_handle_t camera_stream_server_start(void)
 {
+    /* Allocate thermal raw static buffers once */
+    if (!s_thermal_y16) {
+        s_thermal_y16 = heap_caps_calloc(1, THERMAL_NPIX * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+        s_thermal_out = heap_caps_calloc(1, 4 + THERMAL_NPIX, MALLOC_CAP_SPIRAM);
+        s_thermal_sort = heap_caps_calloc(1, THERMAL_NSAMP * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+        s_thermal_raw_mutex = xSemaphoreCreateMutex();
+    }
+
     /* Main HTTP server (port 80) — quick request/response handlers only */
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 8;
